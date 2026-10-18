@@ -359,14 +359,6 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
         (
-            "create_relation",
-            board.create_relation("PAY-1", "PAY-2").err(),
-        ),
-        (
-            "comment_on_brief",
-            board.comment_on_brief("10001", "a note").err(),
-        ),
-        (
             "comment_on_ticket",
             board.comment_on_ticket("PAY-1", "a note").err(),
         ),
@@ -388,6 +380,14 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     verbs.push((
         "create_ticket",
         board.create_ticket(&a_draft(), &a_filing()).err(),
+    ));
+    verbs.push((
+        "create_relation",
+        board.create_relation(CHILD, "PAY-21").err(),
+    ));
+    verbs.push((
+        "comment_on_brief",
+        board.comment_on_brief(BRIEF, A_CUT).err(),
     ));
     verbs
 }
@@ -1906,6 +1906,11 @@ fn the_pre_flight_sends_no_mutation_and_reads_only_under_the_newer_api() {
 /// record holds and the key a person types are all this.
 const CHILD: &str = "PAY-20";
 
+/// The slice's second child, which is the one [`CHILD`] holds up: an edge is
+/// written between two keys the creates answered, so the two halves of one are
+/// never the same issue.
+const HELD_UP: &str = "PAY-21";
+
 /// One draft's title, as a slice hands it over: the summary a child carries.
 const DRAFT: &str = "Read the Epic";
 
@@ -2331,6 +2336,267 @@ fn every_call_a_child_takes_goes_under_the_newer_api_and_only_the_mutations_post
             assert_eq!(method, Method::POST, "{path}");
             assert_ne!(body, Value::Null, "{path}");
         }
+    }
+}
+
+/// The one request that writes an edge, as the stand-in records it. Spelled out
+/// rather than built from the module's own constants, for the reason
+/// [`filed_child`] spells its own — and the two keys are written here in the one
+/// place a swap of them is a failure: `inwardIssue` is the issue that blocks and
+/// `outwardIssue` the one it holds up, so swapping the two compiles, answers the
+/// same shape and inverts every dependency in the slice.
+fn linked(blocker: &str, waiting: &str) -> (Method, String, Value) {
+    (
+        Method::POST,
+        "/rest/api/3/issueLink".to_owned(),
+        json!({
+            // The one default link type that says a dependency, by Jira's own
+            // name for it: a site that renamed it refuses the link in its own
+            // words.
+            "type": { "name": "Blocks" },
+            "inwardIssue": { "key": blocker },
+            "outwardIssue": { "key": waiting },
+        }),
+    )
+}
+
+/// The one request that says a note on the Epic: a POST to the same comment
+/// collection the notes are read out of, carrying the body as the ADF a comment
+/// goes up as.
+///
+/// Built through `adf::document_for` rather than spelled as a tree, where
+/// [`filed_child`] spells its own out: what this has to say is that a note
+/// leaves as a document and not as the Markdown it was written as, and the
+/// converter is asserted in `adf.rs`'s own tests. That the tree reads back as
+/// the note is asserted by the round trip below, through the reader that
+/// matters.
+fn said(key: &str, body: &str) -> (Method, String, Value) {
+    (
+        Method::POST,
+        format!("/rest/api/3/issue/{key}/comment"),
+        json!({ "body": document_for(body) }),
+    )
+}
+
+#[test]
+fn an_edge_is_one_blocks_link_with_the_blocker_as_the_inward_issue() {
+    // A link create answers 201 with nothing after the headers.
+    let board = Jira::new(Calling::answering([Ok(Value::Null)]), a_scope());
+
+    let written = board
+        .create_relation(CHILD, HELD_UP)
+        .expect("the stand-in answered");
+
+    // Nothing comes back and there is nothing to come back: the answer carries
+    // no link id, and the one caller reads the error off this verb and never
+    // the value.
+    assert_eq!(written, "");
+    // One POST to the link collection, both keys in the body and neither in the
+    // path. A second call would panic the stand-in, which is how "no mutation
+    // is retried" is asserted.
+    assert_eq!(
+        board.calls.made(),
+        [linked(CHILD, HELD_UP)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn which_key_is_inward_is_the_whole_of_an_edges_direction() {
+    let board = Jira::new(
+        Calling::answering([Ok(Value::Null), Ok(Value::Null)]),
+        a_scope(),
+    );
+
+    board
+        .create_relation(CHILD, HELD_UP)
+        .expect("the stand-in answered");
+    // The same two issues, the other way round, which is a different edge.
+    board
+        .create_relation(HELD_UP, CHILD)
+        .expect("the stand-in answered");
+
+    let made = board.calls.made();
+
+    assert_eq!(made[0], linked(CHILD, HELD_UP));
+    assert_eq!(made[1], linked(HELD_UP, CHILD));
+    assert_ne!(
+        made[0], made[1],
+        "the direction reached nothing on the wire"
+    );
+}
+
+#[test]
+fn a_link_jira_turns_down_is_reported_in_jiras_words_and_is_not_retried() {
+    let refused = "No issue link type with name 'Blocks' found.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: refused.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board
+        .create_relation(CHILD, HELD_UP)
+        .expect_err("the link was refused");
+
+    assert!(error.to_string().contains(refused), "{error}");
+    // One request and nothing after it: `cut::relate` reads the error off this
+    // and reports it as one line, so every issue the slice filed stands and a
+    // person fixes the edge on the board.
+    assert_eq!(
+        board.calls.made(),
+        [linked(CHILD, HELD_UP)],
+        "the link was retried"
+    );
+}
+
+#[test]
+fn a_note_is_one_comment_on_the_epic_carrying_the_body_as_adf() {
+    // The two bodies `cut.rs` writes, which are one request apiece and differ
+    // only in the prefix they start with: a slice that was cut and a slice
+    // somebody said no to are both settled, and this is the whole record of
+    // either.
+    for note in [A_CUT, A_SKIP] {
+        let board = Jira::new(
+            Calling::answering([Ok(
+                json!({ "id": "10100", "self": "https://example.atlassian.net/rest/api/3/issue/10042/comment/10100" }),
+            )]),
+            a_scope(),
+        );
+
+        let id = board
+            .comment_on_brief(BRIEF, note)
+            .expect("the stand-in answered");
+
+        // Jira's own id for the comment, which no caller reads.
+        assert_eq!(id, "10100", "{note}");
+        assert_eq!(
+            board.calls.made(),
+            [said(BRIEF, note)],
+            "{:?}",
+            board.calls.made()
+        );
+    }
+}
+
+#[test]
+fn the_notes_said_on_the_epic_are_the_ones_a_later_fetch_reads_back() {
+    let writing = Jira::new(
+        Calling::answering([Ok(json!({ "id": "10100" })), Ok(json!({ "id": "10101" }))]),
+        a_scope(),
+    );
+
+    writing
+        .comment_on_brief(BRIEF, A_CUT)
+        .expect("the stand-in answered");
+    writing
+        .comment_on_brief(BRIEF, A_SKIP)
+        .expect("the stand-in answered");
+
+    // The very bodies that went up, handed back as the Epic's comments: the
+    // round trip, and not a tree typed out by hand to match the reader.
+    let comments: Vec<Value> = writing
+        .calls
+        .made()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, _, sent))| json!({ "id": format!("1010{index}"), "body": sent["body"] }))
+        .collect();
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_draftable_epic()),
+            Ok(
+                json!({ "startAt": 0, "maxResults": 100, "total": comments.len(), "comments": comments }),
+            ),
+        ]),
+        a_scope(),
+    );
+
+    let brief = board
+        .fetch_brief(BRIEF)
+        .expect("the stand-in answered")
+        .expect("the site holds the key");
+
+    assert_eq!(brief.notes(), [A_CUT, A_SKIP]);
+    // And read by the reader that decides: a slice one of these names is not
+    // offered a second time, and a skip settles its slice the same way a cut
+    // does.
+    assert_eq!(
+        cut::noted(brief.notes()),
+        [
+            (
+                "read the epic".to_owned(),
+                vec![CHILD.to_owned(), HELD_UP.to_owned()]
+            ),
+            ("read the notes".to_owned(), Vec::new()),
+        ]
+    );
+}
+
+#[test]
+fn a_note_jira_turns_down_is_reported_in_jiras_words_and_is_not_retried() {
+    let refused = "You do not have permission to comment on this issue.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: refused.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board
+        .comment_on_brief(BRIEF, A_CUT)
+        .expect_err("the comment was refused");
+
+    assert!(error.to_string().contains(refused), "{error}");
+    // A comment is not idempotent, so a retried note would record the same
+    // slice twice on one Epic: the caller gets a line and the person decides.
+    assert_eq!(
+        board.calls.made(),
+        [said(BRIEF, A_CUT)],
+        "the note was said twice"
+    );
+}
+
+#[test]
+fn a_note_whose_answer_carries_no_id_is_still_a_note_that_landed() {
+    // Jira answers a comment create with the comment it made, id and all. Bytes
+    // that carry none are not a reason to report a note nobody can take back as
+    // having failed: the next fetch reads it off the Epic and settles the slice.
+    let board = Jira::new(Calling::answering([Ok(Value::Null)]), a_scope());
+
+    let id = board
+        .comment_on_brief(BRIEF, A_CUT)
+        .expect("the note landed");
+
+    assert_eq!(id, "");
+}
+
+#[test]
+fn the_edge_and_the_note_are_one_post_each_under_the_newer_api() {
+    let board = Jira::new(
+        Calling::answering([Ok(Value::Null), Ok(json!({ "id": "10100" }))]),
+        a_scope(),
+    );
+
+    board
+        .create_relation(CHILD, HELD_UP)
+        .expect("the stand-in answered");
+    board
+        .comment_on_brief(BRIEF, A_CUT)
+        .expect("the stand-in answered");
+
+    let made = board.calls.made();
+
+    assert_eq!(made.len(), 2, "{made:?}");
+    for (method, path, body) in made {
+        assert_eq!(method, Method::POST, "{path}");
+        assert!(path.starts_with("/rest/api/3/"), "{path}");
+        assert!(!path.contains("/rest/api/2"), "{path}");
+        assert_ne!(body, Value::Null, "{path}");
     }
 }
 

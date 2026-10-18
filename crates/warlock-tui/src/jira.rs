@@ -41,6 +41,11 @@ const SEARCH: &str = "/rest/api/3/search/jql";
 /// URL is this path and its key and nothing else is needed to build one.
 const ISSUE: &str = "/rest/api/3/issue";
 
+/// Where an edge between two issues is written. A collection of its own and not
+/// a field on either issue: Jira holds a link as a thing between them, so
+/// neither key is in the path and both ride in the body.
+const LINK: &str = "/rest/api/3/issueLink";
+
 /// The project collection, which one project's own statuses hang under by its
 /// key: the only read in this module addressed to a project rather than to an
 /// issue, and the one place the record's project key is asked about on its own.
@@ -69,6 +74,16 @@ const EPIC: &str = "Epic";
 /// reason — warlock guessing a second spelling would file the slice somewhere
 /// nobody asked for.
 const TASK: &str = "Task";
+
+/// Jira's own name for the link type a slice's edges are written as, which is
+/// the one of the default types that says a dependency: a `Relates`, a
+/// `Duplicate` or a clone link holds nothing up.
+///
+/// The site's word, as [`TASK`] and [`EPIC`] are, and the whole of what a site
+/// that renamed it gets is the link refused in Jira's own words — warlock
+/// guessing a second spelling would write an edge saying something nobody asked
+/// for.
+const BLOCKS: &str = "Blocks";
 
 /// Jira's own key for the status category an Epic is still open for drafting
 /// in, written into the JQL a listing narrows by.
@@ -242,10 +257,11 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but seven refuses as this stands: the two a push makes, the
+/// Every verb but nine refuses as this stands: the two a push makes, the
 /// brief-by-name lookup and the brief create; the two a cut reads first, for
 /// whose key it is and for the brief itself; the pre-flight a cut settles
 /// before it files anything and the create that files each of a slice's drafts;
+/// the edge between two of those tickets and the note that records the slice;
 /// and the listing a bare `warlock draft` prints. The requests themselves
 /// arrive a slice at a time, and a board that refuses is what keeps a flow
 /// which reaches a verb nobody has written yet a sentence rather than a panic.
@@ -839,12 +855,72 @@ impl<C: Calls> Board for Jira<C> {
         })
     }
 
-    fn create_relation(&self, _blocker: &str, _waiting: &str) -> Result<String, Error> {
-        self.untaught("record that one ticket blocks another")
+    /// Write the edge saying `blocker` blocks `waiting`, as a [`BLOCKS`] link
+    /// between the two issues, by the keys the creates answered.
+    ///
+    /// The direction lives entirely in which key goes in which field, as it
+    /// does in the Linear arm: with type [`BLOCKS`], `inwardIssue` is the issue
+    /// that blocks and `outwardIssue` the one held up. Swapping the two is a
+    /// change that compiles, answers the same shape and inverts every
+    /// dependency in the slice.
+    ///
+    /// One request and no retry, per this module's rule: a link is not
+    /// idempotent, and nothing here can take one back. An edge Jira turns down
+    /// is the caller's to report — every issue the slice filed stands, because
+    /// a ticket that exists with a missing edge is something a person can fix on
+    /// the board.
+    ///
+    /// The empty string where the Linear arm hands back a relation id: Jira
+    /// answers a link create with a 201 and nothing after the headers, which
+    /// [`answer`] reads as [`Value::Null`], so there is no link id to read. The
+    /// one caller reads the error off this and never the value.
+    fn create_relation(&self, blocker: &str, waiting: &str) -> Result<String, Error> {
+        self.site()?;
+        self.calls.call(
+            Method::POST,
+            LINK,
+            json!({
+                "type": { "name": BLOCKS },
+                "inwardIssue": { "key": blocker },
+                "outwardIssue": { "key": waiting },
+            }),
+        )?;
+
+        Ok(String::new())
     }
 
-    fn comment_on_brief(&self, _project: &str, _body: &str) -> Result<String, Error> {
-        self.untaught("comment on a brief")
+    /// Say one of warlock's own notes on the Epic, as a comment carrying the
+    /// body as an ADF document.
+    ///
+    /// The whole ledger of which of a brief's slices are settled, because
+    /// nothing on this machine records a cut:
+    /// [`fetch_brief`](Self::fetch_brief) reads these back through
+    /// [`notes`](Self::notes), so a slice this note names is not offered a
+    /// second time. A skip is said by this verb too and the same way — the two
+    /// bodies are `cut.rs`'s and differ only in the prefix they start with,
+    /// which is the prefix the read matches on.
+    ///
+    /// One request and no retry, per this module's rule, and here that rule has
+    /// teeth: a comment is not idempotent, so a retried note records the same
+    /// slice twice on one Epic. A note that did not land is a line to print.
+    ///
+    /// The comment's own id rides back where the Linear arm hands back its
+    /// comment's, and the empty string when the answer carries none: no caller
+    /// reads either, and a note that landed is not worth refusing over a field
+    /// nothing asks for.
+    fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error> {
+        self.site()?;
+        let comment = self.calls.call(
+            Method::POST,
+            &said(project),
+            json!({ "body": document_for(body) }),
+        )?;
+
+        Ok(comment
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned())
     }
 
     fn comment_on_ticket(&self, _issue: &str, _body: &str) -> Result<String, Error> {
@@ -937,6 +1013,15 @@ fn browse(base_url: &str, key: &str) -> String {
     url(base_url, &format!("/browse/{key}"))
 }
 
+/// Where one issue's comments live: the collection a note is said into by a
+/// POST, and the one a window of them is read out of by a GET.
+///
+/// The same path for both, as [`transitions`] is one path for a read and a
+/// write, so the collection is spelled once however it is being asked about.
+fn said(key: &str) -> String {
+    format!("{ISSUE}/{key}/comment")
+}
+
 /// Where one issue's comments are read, from the issue's key and how many of
 /// them this read has already seen.
 ///
@@ -952,7 +1037,10 @@ fn browse(base_url: &str, key: &str) -> String {
 /// the notes oldest first: a cut note and a later skip note for the same slice
 /// are read in the order a person wrote them.
 fn comments(key: &str, read: usize) -> String {
-    format!("{ISSUE}/{key}/comment?startAt={read}&maxResults={COMMENTS_PAGE}&orderBy=created")
+    format!(
+        "{}?startAt={read}&maxResults={COMMENTS_PAGE}&orderBy=created",
+        said(key)
+    )
 }
 
 /// Where one issue's moves are read and where one of them is spent: the same
