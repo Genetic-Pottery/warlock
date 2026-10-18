@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://github.com/Genetic-Pottery/warlock/actions/workflows/ci.yml"><img src="https://github.com/Genetic-Pottery/warlock/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/Genetic-Pottery/warlock/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Genetic-Pottery/warlock" alt="License"></a>
+  <a href="https://code.claude.com/docs/en/plugins"><img src="https://img.shields.io/badge/Claude_Code-plugin-D97757?logo=claude&logoColor=white" alt="Claude Code plugin"></a>
   <a href="https://github.com/Genetic-Pottery/warlock/releases/latest"><img src="https://img.shields.io/github/v/release/Genetic-Pottery/warlock" alt="Release"></a>
 </p>
 
