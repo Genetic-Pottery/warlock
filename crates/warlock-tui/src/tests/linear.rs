@@ -14,8 +14,8 @@ use super::{
 };
 
 use crate::board::{
-    Assignee, Blocker, Board, CUT_NOTE, Category, Error, Filable, Holder, NamedTicket, NewBrief,
-    NewTicket, Priority, QueuedTicket, SKIP_NOTE,
+    Assignee, Blocker, Board, CUT_NOTE, Category, Error, Filable, Holder, Moved, NamedTicket,
+    NewBrief, NewTicket, Priority, QueuedTicket, SKIP_NOTE,
 };
 use crate::queue::IN_PROGRESS;
 use crate::stubs::Posting;
@@ -2613,7 +2613,7 @@ fn the_board_moves_a_ticket_by_the_status_name_resolving_the_team_and_the_state_
         .move_ticket("issue-1", IN_PROGRESS)
         .expect("the stand-in answered");
 
-    assert!(moved, "the team has a state of that name");
+    assert!(moved.reached(), "the team has a state of that name");
     assert_eq!(
         board.posts.variables(),
         [
@@ -2640,7 +2640,10 @@ fn a_board_with_no_status_of_that_name_answers_so_and_sends_no_move() {
             .move_ticket("issue-1", "Doing")
             .expect("no such column is an answer");
 
-        assert!(!moved);
+        // No status it could have reached and no standing beside it: what came
+        // back empty here is a team or a state lookup, which says nothing about
+        // the issue's own column.
+        assert_eq!(moved, Moved::unreached());
         let documents = board.posts.documents();
         assert_eq!(documents.len(), asked, "{documents:?}");
         assert!(

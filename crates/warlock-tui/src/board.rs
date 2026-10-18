@@ -76,20 +76,21 @@ pub(crate) trait Board {
     /// happened.
     fn move_brief(&self, project: &str, status: &str) -> Result<bool, Error>;
     fn ticket_brief(&self, issue: &str) -> Result<Option<TicketBrief>, Error>;
-    /// The ticket moved to the board's status of that name, and `true` when a
-    /// status of that name was there to move it to.
+    /// The ticket moved to the board's status of that name, and [`Moved`] saying
+    /// whether a status of that name was there to move it to.
     ///
     /// The name and not an id, because what a status is named is the only thing
     /// two boards agree on: a Linear workflow state has a global id and a Jira
     /// status is reachable only through the transitions of the one issue, so the
     /// board is what turns a name into whatever the move needs.
     ///
-    /// `false` and not an error, and the callers lean on it: a board whose
-    /// workflow nobody has given an `In Progress` or a review state is a board
-    /// warlock reports on and works past, and a run that stopped over it would be
-    /// the board wagging the pull. An answer and not a silent success, so a
-    /// caller cannot mistake "no such column" for a move that happened.
-    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error>;
+    /// [`Moved::Unreached`] and not an error, and the callers lean on it: a
+    /// board whose workflow nobody has given an `In Progress` or a review state
+    /// is a board warlock reports on and works past, and a run that stopped over
+    /// it would be the board wagging the pull. An answer and not a silent
+    /// success, so a caller cannot mistake "no such column" for a move that
+    /// happened.
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<Moved, Error>;
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error>;
     fn planned_briefs(&self) -> Result<Listing, Error>;
     fn brief_named(&self, name: &str) -> Result<Option<String>, Error>;
@@ -254,7 +255,7 @@ impl Board for Boards {
         }
     }
 
-    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error> {
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<Moved, Error> {
         match self {
             Self::Linear(board) => board.move_ticket(issue, status),
             Self::Jira(board) => board.move_ticket(issue, status),
@@ -356,6 +357,49 @@ impl Board for Boards {
             Self::Linear(board) => board.comment_on_ticket(issue, body),
             Self::Jira(board) => board.comment_on_ticket(issue, body),
         }
+    }
+}
+
+/// What [`Board::move_ticket`] came to.
+///
+/// Two answers rather than a bool, because the half a caller has to word is the
+/// one where nothing moved: the person reading that line is looking at a ticket
+/// still in the column it was in, and what they need is the name of somewhere it
+/// could have gone instead. A bool leaves them with neither that nor where it
+/// stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Moved {
+    /// A status of that name was reached, and the ticket is in it.
+    Reached,
+    /// The board offered no way into a status of that name, so nothing was
+    /// moved.
+    ///
+    /// Both facts are the board's own, and a board that cannot say either says
+    /// nothing: Jira reads them off the one issue, whose transitions are the
+    /// whole of where it can go, where Linear reaches this answer through a team
+    /// or a state it looked for and did not find, which says nothing about the
+    /// issue.
+    Unreached {
+        reachable: Vec<String>,
+        standing: Option<String>,
+    },
+}
+
+impl Moved {
+    /// Nothing moved, and the board naming neither where the ticket could have
+    /// gone nor where it stands: what a board answers when what it failed to
+    /// find was a status, so it never asked the ticket anything.
+    #[must_use]
+    pub(crate) const fn unreached() -> Self {
+        Self::Unreached {
+            reachable: Vec::new(),
+            standing: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn reached(&self) -> bool {
+        matches!(self, Self::Reached)
     }
 }
 

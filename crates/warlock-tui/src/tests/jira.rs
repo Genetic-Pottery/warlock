@@ -11,7 +11,7 @@ use super::{
 };
 
 use crate::adf::document_for;
-use crate::board::{Board, Category, Error, Filable, Holder, NewBrief, NewTicket, Priority};
+use crate::board::{Board, Category, Error, Filable, Holder, Moved, NewBrief, NewTicket, Priority};
 use crate::brief::{Slice, scope_block_in};
 use crate::cut;
 use crate::queue::IN_PROGRESS;
@@ -355,7 +355,6 @@ fn field_errors_are_named_after_the_messages() {
 fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     vec![
         ("ticket_brief", board.ticket_brief("PAY-1").err()),
-        ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
         ("named_ticket", board.named_ticket(1).err()),
         (
             "comment_on_ticket",
@@ -390,6 +389,7 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         board.comment_on_brief(BRIEF, A_CUT).err(),
     ));
     verbs.push(("move_brief", board.move_brief(BRIEF, IN_PROGRESS).err()));
+    verbs.push(("move_ticket", board.move_ticket(TICKET, IN_PROGRESS).err()));
     verbs
 }
 
@@ -1969,9 +1969,11 @@ fn filed_child() -> (Method, String, Value) {
     )
 }
 
-/// The status read that follows a child's create: a create answers an `id`, a
-/// `key` and a `self` and says nothing about status, so where the workflow's
-/// initial transition put the child is read back by its key.
+/// The read of where one issue stands, by its key and for that field alone: the
+/// read that follows a child's create, because a create answers an `id`, a `key`
+/// and a `self` and says nothing about status, and the read a move that reached
+/// nothing makes, because a transitions answer says where an issue can go and
+/// never where it is.
 fn status_of(key: &str) -> (Method, String, Value) {
     (
         Method::GET,
@@ -3385,6 +3387,91 @@ fn a_link_answer_missing_any_field_a_blocker_is_read_out_of_is_malformed() {
     assert!(
         matches!(error, Error::Malformed { board: JIRA, .. }),
         "{error:?}"
+    );
+}
+
+/// The status a record names as the one a ticket in review belongs in, which is
+/// the name a pull's second move asks for. No default workflow reaches it, which
+/// is the whole of why the answer to a move has to say more than `false`.
+const REVIEW: &str = "In Review";
+
+/// Where the ticket stands as the status read answers it: the column it was
+/// moved into when the run started, which is where it stays when nothing can
+/// reach the one that was asked for.
+fn stood_in(status: &str, category: &str) -> Value {
+    json!({
+        "id": "10031",
+        "key": TICKET,
+        "fields": { "status": { "name": status, "statusCategory": { "key": category } } },
+    })
+}
+
+#[test]
+fn the_ticket_is_moved_by_the_transition_whose_destination_carries_that_name() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_default_workflow()),
+            // A transition answers 204 with nothing after the headers.
+            Ok(Value::Null),
+        ]),
+        a_scope(),
+    );
+
+    let answered = board
+        .move_ticket(TICKET, IN_PROGRESS)
+        .expect("the stand-in answered");
+
+    assert_eq!(answered, Moved::Reached);
+    // The moves the ticket offers read, then the one whose `to` is called that
+    // posted by its id and nothing else in the body — and no status read, which
+    // is a read bought for a line nobody prints when the move happened. A third
+    // call would panic the stand-in, which is how "one request per read and one
+    // per post" is asserted.
+    assert_eq!(
+        board.calls.made(),
+        [offered(TICKET), moved(TICKET, "21")],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn a_workflow_reaching_no_status_of_that_name_names_what_it_reaches_and_where_the_ticket_stands() {
+    // A default workflow and a review state, which is the pair a pull meets on
+    // an unedited board: nothing it offers is called `In Review`, and a run that
+    // said only that the move had not happened would leave a person looking at a
+    // ticket in `In Progress` with nothing on screen to act on.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_default_workflow()),
+            Ok(stood_in(IN_PROGRESS, "indeterminate")),
+        ]),
+        a_scope(),
+    );
+
+    let answered = board
+        .move_ticket(TICKET, REVIEW)
+        .expect("no such status is an answer");
+
+    // Every status the workflow does reach, in the order the site listed them,
+    // and the one the ticket is in now: the two facts the caller's line is made
+    // of.
+    assert_eq!(
+        answered,
+        Moved::Unreached {
+            reachable: vec![TO_DO.to_owned(), IN_PROGRESS.to_owned(), "Done".to_owned()],
+            standing: Some(IN_PROGRESS.to_owned()),
+        }
+    );
+    // The transitions read and the status read, and no POST at all: no second
+    // attempt at a status of another name, because the caller asked for one
+    // column and warlock moving the ticket to a different one would be a move
+    // nobody asked for.
+    assert_eq!(
+        board.calls.made(),
+        [offered(TICKET), status_of(TICKET)],
+        "{:?}",
+        board.calls.made()
     );
 }
 

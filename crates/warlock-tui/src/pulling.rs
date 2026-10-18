@@ -173,6 +173,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             .board
             .move_ticket(ticket.id, IN_PROGRESS)
             .map_err(Error::board)?
+            .reached()
         {
             self.report(PullEvent::NoStartState {
                 team: self.scope.ticket_prefix().to_owned(),
@@ -544,6 +545,7 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
             .board
             .move_ticket(ticket.id, review)
             .map_err(Error::board)?
+            .reached()
         {
             self.report(PullEvent::NoReviewState {
                 team: self.scope.ticket_prefix().to_owned(),

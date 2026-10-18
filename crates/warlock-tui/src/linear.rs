@@ -22,8 +22,8 @@ use warlock_engine::{BoardScope, ScopeRecord};
 
 use crate::board::{
     Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief,
-    FiledTicket, Holder, Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket,
-    SKIP_NOTE, TicketBrief,
+    FiledTicket, Holder, Listing, Moved, NamedTicket, NewBrief, NewTicket, Priority, Queue,
+    QueuedTicket, SKIP_NOTE, TicketBrief,
 };
 use crate::queue::same_name;
 
@@ -216,17 +216,22 @@ impl<P: Posts> Board for Linear<P> {
     /// workflow state belongs to a team and the mutation wants its id, so the
     /// team key comes off the record this board was opened with and the name is
     /// matched among that team's own states. A name no state of the team
-    /// carries, or a key the workspace has no team for, is `false` with the
-    /// mutation never sent.
-    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, Error> {
+    /// carries, or a key the workspace has no team for, is [`Moved::Unreached`]
+    /// with the mutation never sent.
+    ///
+    /// That answer names no statuses and no standing, which is not a gap in this
+    /// arm: what came back empty is a team or a state lookup, and listing a
+    /// team's whole column set or reading the issue's own state would be reads
+    /// bought to decorate a line about a column nothing depends on.
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<Moved, Error> {
         let Some(team) = team_id(&self.posts, self.scope()?.ticket_prefix())? else {
-            return Ok(false);
+            return Ok(Moved::unreached());
         };
         let Some(state) = workflow_state(&self.posts, &team, status)? else {
-            return Ok(false);
+            return Ok(Moved::unreached());
         };
         move_issue(&self.posts, issue, &state)?;
-        Ok(true)
+        Ok(Moved::Reached)
     }
 
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, Error> {
@@ -534,10 +539,10 @@ fn backlog_state(linear: &impl Posts, team: &str) -> Result<Option<String>, Erro
 /// state by it.
 ///
 /// `None` rather than an error, and here it is load-bearing rather than tidy: it
-/// is what [`Board::move_ticket`] answers `false` on, and a pull prints that as
-/// one line and works the ticket anyway. A workflow column is a courtesy to
-/// people who are not watching the terminal, and nothing about the work depends
-/// on it.
+/// is what [`Board::move_ticket`] answers [`Moved::Unreached`] on, and a pull
+/// prints that as one line and works the ticket anyway. A workflow column is a
+/// courtesy to people who are not watching the terminal, and nothing about the
+/// work depends on it.
 ///
 /// Matched trimmed and case-insensitively, because `In progress` and
 /// `In Progress` are the same column to everyone except a string comparison.

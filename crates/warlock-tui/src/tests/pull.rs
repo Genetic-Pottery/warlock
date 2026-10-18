@@ -13,7 +13,7 @@ use super::{Ports, Prepared, Progress, Shared, held, prepare, pulled, shared};
 use crate::board::{
     Assignee, Blocker, Category, NamedTicket, Opens, Priority, Queue, QueuedTicket,
 };
-use crate::claude::Activity;
+use crate::claude::{Activity, Split, Stopped, Unsplit};
 use crate::error::status_for;
 use crate::error::{Error, NO_QUEUE};
 use crate::git::{Dirty, Opened};
@@ -449,16 +449,44 @@ fn a_jira_queue() -> Value {
     })
 }
 
+/// The moves that ticket offers from where the queue found it, as the
+/// transitions read answers them: the status the run's first move asks for, by
+/// the id that move is posted with.
+///
+/// The body each of the two calls went out with is `tests/jira.rs`'s own
+/// assertion; what a flow test says is which request came when.
+fn a_jira_workflow() -> Value {
+    json!({
+        "expand": "transitions",
+        "transitions": [{
+            "id": "21",
+            "name": "Start work",
+            "to": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } },
+        }],
+    })
+}
+
 #[test]
-fn a_pull_over_a_jira_scope_takes_the_queues_ticket_and_stops_at_the_first_unwritten_verb() {
+fn a_pull_over_a_jira_scope_moves_its_ticket_by_transition_and_stops_at_the_first_unwritten_verb() {
     let ground = Ground::jira();
     let prepared = ground.prepared();
     let repo = Checkout::clean(DEFAULT);
-    // Whose key it is, then the scope's queue: selection asks for the account
-    // before anything else and chooses out of what the search answers. Nothing
-    // is written down after those two, so a third request would panic the
-    // stand-in rather than being asserted about afterwards.
-    let jira = Opening::answering([Ok(json!({ "accountId": ACCOUNT })), Ok(a_jira_queue())]);
+    // Whose key it is, the scope's queue, then the moves the chosen ticket
+    // offers and the one of them that is spent: selection asks for the account
+    // before anything else, chooses out of what the search answers, and the run
+    // puts the ticket it took in progress before it splits anything. A fifth
+    // request would panic the stand-in rather than being asserted about
+    // afterwards.
+    let jira = Opening::answering([
+        Ok(json!({ "accountId": ACCOUNT })),
+        Ok(a_jira_queue()),
+        Ok(a_jira_workflow()),
+        // A transition answers 204 with nothing after the headers.
+        Ok(Value::Null),
+    ]);
+    // A split that halts, so the run reaches the comment a halt says on its
+    // ticket without raising a session, which this test writes no answer for.
+    let split = Slicing::answering(Split::Halted(Unsplit::Stopped(Stopped::UsageLimit)));
 
     let (outcome, printed) = pull_with(
         &ground,
@@ -467,34 +495,43 @@ fn a_pull_over_a_jira_scope_takes_the_queues_ticket_and_stops_at_the_first_unwri
             open: &jira,
             repo: &repo,
             forge: &Forging::opening(URL),
-            split: &no_split(),
+            split: &split,
             sessions: &no_sessions(),
         },
         None,
         false,
     );
 
-    // The move, which is the first verb past selection that warlock has no
-    // request for on this board, refused in the board's own words.
-    let error = outcome.expect_err("a Jira board cannot move a ticket yet");
+    // The halt's comment, which is the first verb past the move that warlock has
+    // no request for on this board, refused in the board's own words.
+    let error = outcome.expect_err("a Jira board cannot comment on a ticket yet");
     assert_eq!(
         error.to_string(),
-        "warlock cannot move a ticket on a Jira scope yet, so nothing was sent"
+        "warlock cannot comment on a ticket on a Jira scope yet, so nothing was sent"
     );
-    // Both requests went out, in that order: the account and then the queue.
+    // All four requests went out, in that order: the account, the queue, and the
+    // ticket's transitions read and then posted — the same collection both ways,
+    // addressed by the key the search answered.
     assert_eq!(jira.opened_with(), [NOT_A_KEY]);
     assert_eq!(
         jira.spelled(),
         [
             (Method::GET, "/rest/api/3/myself".to_owned()),
             (Method::POST, "/rest/api/3/search/jql".to_owned()),
+            (
+                Method::GET,
+                format!("/rest/api/3/issue/{JIRA_TICKET}/transitions")
+            ),
+            (
+                Method::POST,
+                format!("/rest/api/3/issue/{JIRA_TICKET}/transitions")
+            ),
         ]
     );
     // And the ticket the search answered is the one the run took: the tree was
     // read, then the base checked out and caught up, then a branch cut carrying
-    // the number out of that key. Which is as far as this board gets — the move
-    // is the next thing asked, and nothing is written down for a run that never
-    // reached its split.
+    // the number out of that key. Nothing was committed on it, because the split
+    // halted before any sub-task was worked.
     let calls = repo.calls();
     assert_eq!(
         calls[..4],
@@ -515,8 +552,14 @@ fn a_pull_over_a_jira_scope_takes_the_queues_ticket_and_stops_at_the_first_unwri
         "{calls:?}"
     );
     assert_eq!(calls.len(), 5, "{calls:?}");
-    assert_eq!(printed, "");
-    assert!(!ground.any_record());
+    // The split's own heading, and the run's record on this machine: the branch
+    // exists, so the record is the only thing that says this machine holds the
+    // run.
+    assert_eq!(
+        printed,
+        format!("warlock: {JIRA_TICKET} — splitting {TITLE}\n")
+    );
+    assert!(ground.any_record());
 }
 
 #[test]

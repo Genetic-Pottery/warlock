@@ -12,7 +12,7 @@ use warlock_engine::{ScopeRecord, agent, drafting, working};
 
 use crate::asking::Asks;
 use crate::board::{
-    Board, Error as BoardError, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
+    Board, Error as BoardError, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing, Moved,
     NamedTicket, NewBrief, NewTicket, Opens, Queue, TicketBrief,
 };
 use crate::claude::{Activities, Activity, Cancel, Converses, Split, Stopped, Wired, Worked};
@@ -1000,15 +1000,22 @@ impl Board for Boarding {
     /// state at all: which name was asked for is in the recorded call, so a test
     /// asserting that a flow asked for `In Progress` reads it there rather than
     /// from the answer. A board built [`without_states`] has no states, so
-    /// every move answers that there is no status of that name.
+    /// every move answers that there is no status of that name — naming none it
+    /// could have reached and no standing, as the Linear board it stands in for
+    /// answers one.
     ///
     /// [`without_states`]: Boarding::without_states
-    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, BoardError> {
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<Moved, BoardError> {
         self.ask(Call::MoveTicket {
             issue: issue.to_owned(),
             status: status.to_owned(),
         })?;
-        Ok(self.state.is_some())
+
+        if self.state.is_some() {
+            Ok(Moved::Reached)
+        } else {
+            Ok(Moved::unreached())
+        }
     }
 
     fn fetch_brief(&self, slug: &str) -> Result<Option<FetchedBrief>, BoardError> {
