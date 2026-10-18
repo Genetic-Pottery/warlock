@@ -3,7 +3,9 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use serde_json::{Value, json};
 use tempfile::TempDir;
+use ureq::http::Method;
 use warlock_engine::drafting::{Draft, stub_answer};
 use warlock_engine::{
     Destination, Manifest, ScopeRecord, ScopedDirectory, agent, save_key, save_key_binding,
@@ -17,8 +19,9 @@ use super::{Planned, Settled, cut_with, listing, listing_lines, prepare};
 const ACCEPT: &str = "create";
 
 const SKIP: &str = "quit";
+use crate::adf::document_for;
 use crate::asking::Asks;
-use crate::board::{FetchedBrief, Listing, Opens};
+use crate::board::{Board, Error as BoardError, FetchedBrief, Listing, Opens};
 use crate::brief::ScopeBlockError;
 use crate::claude::{
     Activities, Cancel, Converses, DRAFTING_CONTRACT, DRAFTING_ROUNDS, NOTHING_SETTLES_IT, Wired,
@@ -39,6 +42,11 @@ const KEY_NAME: &str = "work";
 const SCOPE: &str = "warlock-team";
 
 const TEAM: &str = "WAR";
+
+// What a Jira scope carries where a Linear one carries [`TEAM`]: the project a
+// brief is read out of, and the prefix every ticket key of that scope starts
+// with.
+const PROJECT: &str = "PAY";
 
 const LABEL: &str = "warlock";
 
@@ -272,7 +280,7 @@ fn a_jira_record(name: &str) -> ScopeRecord {
     ScopeRecord::jira(
         name,
         "https://acme.atlassian.net",
-        "PAY",
+        PROJECT,
         "In Review",
         LABEL,
     )
@@ -683,7 +691,7 @@ mod preparing {
         let error = refused(repo.path(), home.path(), SLUG, None, &Boarding::filing(""));
 
         assert!(
-            matches!(&error, Error::UnknownProject { slug, scope } if slug == SLUG && scope == SCOPE),
+            matches!(&error, Error::UnknownProject { board, slug, scope } if *board == "Linear" && slug == SLUG && scope == SCOPE),
             "{error:?}"
         );
         let message = said(&error);
@@ -2804,5 +2812,335 @@ mod finishing {
             "{:?}",
             settled[0].reported
         );
+    }
+}
+
+// The same dry run over a scope that files to Jira, driven through the very
+// board the opener would have built: what `mod headless` says about the Linear
+// arm, said again about the requests the Jira arm spells and the answers it
+// reads back out of them.
+//
+// Here rather than in `tests/jira.rs`, which drives one verb at a time: what
+// these are about is the order `prepare` asks in — the account, then the brief,
+// then the gate, then the `## Scope` parse, then the notes — and that nothing
+// but a read went out on the way.
+mod jira {
+    use super::*;
+
+    // The key a person types, which is the whole address of the Epic: the
+    // project key is `a_jira_record`'s, so a read addressed anywhere else is a
+    // failure here.
+    const BRIEF: &str = "PAY-14";
+
+    // A key in the same project that the site holds no issue for, which is
+    // Jira's 404.
+    const NO_SUCH_BRIEF: &str = "PAY-999";
+
+    // The account the key authenticates as, as Jira's own `accountId`: the one
+    // thing `prepare` reads before the brief.
+    const ACCOUNT: &str = "5b10a2844c20165700ede21g";
+
+    // The status a team-managed workflow opens an issue in, and the two a board
+    // may spell its started and finished columns with: none of the three is a
+    // word warlock knows, which is what makes the category the judgement and
+    // the name the thing printed back.
+    const TO_DO: &str = "To Do";
+
+    const IN_DEV: &str = "In dev on a branch";
+
+    const SHIPPED: &str = "Shipped to production";
+
+    // The board the Jira seam builds, so the 404 below carries the board's own
+    // name off the trait rather than the vendor typed out again here.
+    type JiraBoard = <Opening as Opens>::Board;
+
+    fn myself() -> Value {
+        json!({ "accountId": ACCOUNT })
+    }
+
+    // One Epic as an issue read answers it, with its description as the ADF
+    // tree the site holds: written through the converter a push files a brief
+    // with, so what a dry run reports is the round trip and not Markdown handed
+    // straight back.
+    fn an_epic(status: &str, category: &str, description: &Value) -> Value {
+        json!({
+            "id": "10042",
+            "key": BRIEF,
+            "fields": {
+                "summary": NAME,
+                "status": { "name": status, "statusCategory": { "key": category } },
+                "description": description,
+            },
+        })
+    }
+
+    // The Epic a draft is about to read: the three slices of `SLICED`, in the
+    // status it is open for drafting in.
+    fn a_draftable_epic() -> Value {
+        an_epic(TO_DO, "new", &document_for(SLICED))
+    }
+
+    // The Epic's comments, each body the ADF a comment arrives as. One page,
+    // because what a note is and how many pages of them there are is
+    // `tests/jira.rs`'s business.
+    fn commented(bodies: &[&str]) -> Value {
+        let comments: Vec<Value> = bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                json!({ "id": format!("{}", index + 1), "body": document_for(body) })
+            })
+            .collect();
+
+        json!({
+            "startAt": 0,
+            "maxResults": 100,
+            "total": comments.len(),
+            "comments": comments,
+        })
+    }
+
+    // The Epic before its first cut, which carries no comment at all.
+    fn uncommented() -> Value {
+        commented(&[])
+    }
+
+    // Every request a dry run makes, spelled out rather than built from the
+    // module's own constants: a path moving, the fields asked for changing or a
+    // fourth request appearing is a failure here. All three are reads, which is
+    // the whole of "nothing was sent".
+    //
+    // The issue is read under the key that was typed and the notes under the one
+    // Jira spelled back, which is why only the first takes a parameter.
+    fn reads(key: &str) -> Vec<(Method, String)> {
+        vec![
+            (Method::GET, "/rest/api/3/myself".to_owned()),
+            (
+                Method::GET,
+                format!("/rest/api/3/issue/{key}?fields=summary,status,description"),
+            ),
+            (
+                Method::GET,
+                format!(
+                    "/rest/api/3/issue/{BRIEF}/comment?startAt=0&maxResults=100&orderBy=created"
+                ),
+            ),
+        ]
+    }
+
+    // The whole subcommand as a dry run over the Jira scope, with the models and
+    // the stdin that panic when they are reached: that is what makes "nothing
+    // was drafted" an assertion about the order rather than a reading of the
+    // line printed.
+    fn dry_running(
+        answers: impl IntoIterator<Item = Result<Value, BoardError>>,
+        key: &str,
+    ) -> (Result<(), Error>, String, Opening) {
+        let repo = a_jira_repository();
+        let home = a_home(repo.path());
+        let jira = Opening::answering(answers);
+
+        let (outcome, printed) = cut_to(repo.path(), home.path(), key, None, true, &jira);
+
+        (outcome, printed, jira)
+    }
+
+    #[test]
+    fn a_dry_run_reports_the_brief_its_status_and_every_slice_and_sends_no_mutation() {
+        let (outcome, printed, jira) = dry_running(
+            [Ok(myself()), Ok(a_draftable_epic()), Ok(uncommented())],
+            BRIEF,
+        );
+
+        outcome.expect("a dry run answers");
+        // The account, the Epic, then its comments, and nothing after them: the
+        // queue read `prepare` asks for next is untaught on this board and
+        // sends nothing, and a dry run spends nothing else.
+        assert_eq!(jira.spelled(), reads(BRIEF), "{:?}", jira.made());
+        for (method, path, body) in jira.made() {
+            assert_eq!(method, Method::GET, "{path} was not a read");
+            assert_eq!(body, Value::Null, "{path} carried a body");
+        }
+        assert_eq!(jira.opened_with(), [NOT_A_KEY]);
+
+        let lines = lines(&printed);
+        // One line for the run and one per slice, and nothing else.
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        // The board's own status word, and the project key as the prefix a
+        // ticket of this scope is keyed by.
+        for said in [NAME, TO_DO, PROJECT, SCOPE, "3 slices", "0 already cut"] {
+            assert!(lines[0].contains(said), "{said} is not in: {}", lines[0]);
+        }
+        assert!(
+            lines[0].contains("nothing was drafted"),
+            "a dry run has to say it was one: {}",
+            lines[0]
+        );
+        // The description read back through the ADF reader, parsed for its
+        // slices and printed in the cut order.
+        assert!(placed(&lines, FIRST) < placed(&lines, SECOND), "{lines:?}");
+        assert!(placed(&lines, SECOND) < placed(&lines, THIRD), "{lines:?}");
+        // The key value reaches the client and nothing else, here as everywhere.
+        assert!(!printed.contains(NOT_A_KEY), "{printed}");
+    }
+
+    #[test]
+    fn a_dry_run_reports_the_slices_an_earlier_run_already_cut_off_the_epics_own_notes() {
+        let (outcome, printed, jira) = dry_running(
+            [
+                Ok(myself()),
+                Ok(a_draftable_epic()),
+                Ok(commented(&[
+                    "Looks right to me.",
+                    &a_cut(FIRST, &["PAY-20", "PAY-21"]),
+                    &a_skip(SECOND),
+                ])),
+            ],
+            BRIEF,
+        );
+
+        outcome.expect("one slice is left to cut");
+        assert_eq!(jira.spelled(), reads(BRIEF), "{:?}", jira.made());
+
+        let lines = lines(&printed);
+        // Two of the three settled, by a cut note and a skip note each read back
+        // out of the ADF a comment arrives as. The person's comment beside them
+        // is there because a real Epic carries such comments; which of them are
+        // carried back at all is `tests/jira.rs`'s own assertion.
+        assert!(lines[0].contains("2 already cut"), "{lines:?}");
+        let cut = &lines[placed(&lines, FIRST)];
+        assert!(cut.contains("PAY-20") && cut.contains("PAY-21"), "{cut}");
+        assert!(
+            lines[placed(&lines, SECOND)].contains("skipped"),
+            "{lines:?}"
+        );
+        assert!(
+            !lines[placed(&lines, THIRD)].contains("already cut"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_the_site_does_not_hold_is_the_unknown_brief_refusal_with_nothing_printed() {
+        let (outcome, printed, jira) = dry_running(
+            [
+                Ok(myself()),
+                Err(BoardError::Absent {
+                    board: <JiraBoard as Board>::NAME,
+                    message: Some(
+                        "Issue does not exist or you do not have permission to see it.".to_owned(),
+                    ),
+                }),
+            ],
+            NO_SUCH_BRIEF,
+        );
+
+        assert!(printed.is_empty(), "a refusal printed something: {printed}");
+        let error = refusal(outcome);
+        // The absence rather than the 404: Jira's own words about the issue
+        // never reach the reader, and the existing sentence is what does.
+        assert!(
+            matches!(&error, Error::UnknownProject { board, slug, scope } if *board == <JiraBoard as Board>::NAME && slug == NO_SUCH_BRIEF && scope == SCOPE),
+            "{error:?}"
+        );
+        let message = said(&error);
+        assert!(message.contains(NO_SUCH_BRIEF), "{message}");
+        assert!(
+            message.contains("warlock draft warlock-team"),
+            "the command that lists the briefs is not named: {message}"
+        );
+        // The account read and the issue read, and no comment read: there is
+        // nothing to read the notes of.
+        assert_eq!(
+            jira.spelled(),
+            reads(NO_SUCH_BRIEF)[..2],
+            "{:?}",
+            jira.made()
+        );
+    }
+
+    #[test]
+    fn an_epic_a_board_calls_started_or_finished_is_refused_naming_its_own_status_word() {
+        for (status, category) in [(IN_DEV, "indeterminate"), (SHIPPED, "done")] {
+            let (outcome, printed, jira) = dry_running(
+                [
+                    Ok(myself()),
+                    Ok(an_epic(status, category, &document_for(SLICED))),
+                    Ok(uncommented()),
+                ],
+                BRIEF,
+            );
+
+            assert!(printed.is_empty(), "{status}: {printed}");
+            let error = refusal(outcome);
+            assert!(
+                matches!(&error, Error::NotPlanned { status: found, .. } if found.as_deref() == Some(status)),
+                "`{status}` was drafted: {error:?}"
+            );
+            // The board's own spelling, which is what somebody sent to look will
+            // find written on the Epic.
+            let message = said(&error);
+            assert!(message.contains(status), "{message}");
+            // Nothing is sent after the gate: the brief's slices are never
+            // parsed and no queue is asked for.
+            assert_eq!(jira.spelled(), reads(BRIEF), "{status}: {:?}", jira.made());
+        }
+    }
+
+    #[test]
+    fn an_epic_whose_description_holds_no_scope_block_is_refused_in_the_parsers_own_words() {
+        let (outcome, printed, _) = dry_running(
+            [
+                Ok(myself()),
+                Ok(an_epic(TO_DO, "new", &document_for(NO_SCOPE))),
+                Ok(uncommented()),
+            ],
+            BRIEF,
+        );
+
+        assert!(printed.is_empty(), "a refusal printed something: {printed}");
+        let error = refusal(outcome);
+        assert!(matches!(error, Error::ScopeBlock { .. }), "{error:?}");
+        assert_eq!(said(&error), ScopeBlockError::NoScope.to_string());
+    }
+
+    #[test]
+    fn a_brief_edited_in_the_jira_ui_still_reports_its_slices() {
+        // A panel dropped in beside the headings, which is a node type warlock
+        // neither writes nor models: the reader is total, so the brief comes
+        // back plainer with its headings intact and the dry run reads the same
+        // three slices off it.
+        let mut description = document_for(SLICED);
+        let panel = json!({
+            "type": "panel",
+            "attrs": { "panelType": "info" },
+            "content": [{
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Edited here." }],
+            }],
+        });
+        description["content"]
+            .as_array_mut()
+            .expect("a document with blocks in it")
+            .insert(2, panel);
+
+        let (outcome, printed, _) = dry_running(
+            [
+                Ok(myself()),
+                Ok(an_epic(TO_DO, "new", &description)),
+                Ok(uncommented()),
+            ],
+            BRIEF,
+        );
+
+        outcome.expect("a brief with an unknown node in it still parses");
+        let lines = lines(&printed);
+        assert!(lines[0].contains("3 slices"), "{lines:?}");
+        for slice in [FIRST, SECOND, THIRD] {
+            assert!(
+                lines.iter().any(|line| line.contains(slice)),
+                "{slice} is not in: {lines:?}"
+            );
+        }
     }
 }

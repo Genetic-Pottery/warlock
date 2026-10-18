@@ -114,7 +114,7 @@ enum Command {
         command: ScopeCommand,
     },
     #[command(
-        about = "Name the key a scope is bound to, or store, list, bind and forget the named Linear keys this machine holds.",
+        about = "Name the key a scope is bound to, or store, list, bind and forget the named board keys this machine holds.",
         long_about = None,
         args_conflicts_with_subcommands = true,
         arg_required_else_help = true
@@ -325,7 +325,7 @@ enum ScopeCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 enum KeyCommand {
     #[command(
-        about = "Read a Linear key on stdin and store it under a name.",
+        about = "Read a board key on stdin and store it under a name.",
         long_about = None
     )]
     Add {

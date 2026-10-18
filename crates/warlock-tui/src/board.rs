@@ -41,6 +41,13 @@ pub(crate) trait Board {
     /// client still has to name the board it wraps.
     const NAME: &'static str;
 
+    /// The vendor's name for this board as opened, for a sentence warlock words
+    /// itself. A method beside [`NAME`](Board::NAME) because [`Boards`] knows
+    /// its vendor only once a record has chosen it.
+    fn vendor(&self) -> &'static str {
+        Self::NAME
+    }
+
     /// Whatever one board has to have in hand before it can create a ticket, in
     /// that board's own terms: a team and a column as ids here, and nothing at
     /// all for a board whose create resolves nothing.
@@ -212,6 +219,13 @@ impl Board for Boards {
     /// Linear's, which is every filing there is: the Jira board settles `()`
     /// and refuses the verb that would answer one.
     type Filing = Resolved;
+
+    fn vendor(&self) -> &'static str {
+        match self {
+            Self::Linear(board) => board.vendor(),
+            Self::Jira(board) => board.vendor(),
+        }
+    }
 
     fn viewer(&self) -> Result<String, Error> {
         match self {
@@ -1154,6 +1168,14 @@ pub enum Error {
         board: &'static str,
         message: String,
     },
+    /// A 404, kept apart from [`Error::Refused`] so a caller asking whether the
+    /// thing it addressed is there reads the status and not the vendor's prose,
+    /// which also says "does not exist" about a field or an issue type. The
+    /// board's words ride along for the sentence when the body carried any.
+    Absent {
+        board: &'static str,
+        message: Option<String>,
+    },
 }
 
 impl fmt::Display for Error {
@@ -1186,6 +1208,14 @@ impl fmt::Display for Error {
             Self::Refused { board, message } => {
                 write!(f, "{board} refused the request: {message}")
             }
+            Self::Absent {
+                board,
+                message: Some(message),
+            } => write!(f, "{board} answered 404: {message}"),
+            Self::Absent {
+                board,
+                message: None,
+            } => write!(f, "{board} answered 404"),
         }
     }
 }
@@ -1201,7 +1231,8 @@ impl std::error::Error for Error {
             | Self::Untaught { .. }
             | Self::Status { .. }
             | Self::Malformed { .. }
-            | Self::Refused { .. } => None,
+            | Self::Refused { .. }
+            | Self::Absent { .. } => None,
         }
     }
 }
