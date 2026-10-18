@@ -271,14 +271,15 @@ fn a_project_with_every_slice_cut_names_the_project_and_where_its_notes_are() {
 #[test]
 fn a_slug_the_board_does_not_know_names_the_command_that_lists_them() {
     let error = Error::UnknownProject {
-        slug: "9e41c07a2b13".to_owned(),
+        board: "Jira",
+        slug: "PAY-999".to_owned(),
         scope: "warlock-team".to_owned(),
     };
 
     assert_eq!(
         error.to_string(),
-        "Linear knows no project with the slug `9e41c07a2b13`, so nothing was read: `warlock \
-         draft warlock-team` lists the planned ones"
+        "Jira holds no brief `PAY-999`, so nothing was read: `warlock draft warlock-team` lists \
+         the planned ones"
     );
 }
 
@@ -347,9 +348,9 @@ fn a_brief_the_board_already_holds_leads_with_its_address() {
 
     assert_eq!(
         error.to_string(),
-        "a project named `Push a brief` is already filed at \
+        "a brief named `Push a brief` is already filed at \
          https://linear.app/acme/project/a-brief-1a2b3c, so nothing was sent: a brief that changed \
-         after it was filed is edited on the project"
+         after it was filed is edited where it was filed"
     );
 }
 

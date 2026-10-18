@@ -67,6 +67,10 @@ fn variants() -> Vec<Error> {
             board: JIRA,
             message: "Issue does not exist".to_owned(),
         },
+        Error::Absent {
+            board: JIRA,
+            message: None,
+        },
     ]
 }
 
@@ -287,15 +291,43 @@ fn a_success_whose_body_is_not_json_is_malformed() {
 #[test]
 fn a_refusal_carries_jiras_reasons() {
     let error = answer(
-        404,
-        r#"{"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}"#,
+        400,
+        r#"{"errorMessages":["The value 'Epic' does not exist for the field 'issuetype'."],"errors":{}}"#,
     )
     .unwrap_err();
 
     assert_eq!(
         error.to_string(),
-        "Jira refused the request: Issue does not exist or you do not have permission to see it."
+        "Jira refused the request: The value 'Epic' does not exist for the field 'issuetype'."
     );
+}
+
+#[test]
+fn a_404_is_an_absence_whatever_its_body_says() {
+    let said = "Issue does not exist or you do not have permission to see it.";
+    let worded = answer(
+        404,
+        &format!(r#"{{"errorMessages":["{said}"],"errors":{{}}}}"#),
+    )
+    .unwrap_err();
+    let bare = answer(404, "<html>not found</html>").unwrap_err();
+
+    assert!(
+        matches!(&worded, Error::Absent { board: JIRA, message: Some(message) } if message == said),
+        "{worded:?}"
+    );
+    assert_eq!(worded.to_string(), format!("Jira answered 404: {said}"));
+    assert!(
+        matches!(
+            &bare,
+            Error::Absent {
+                board: JIRA,
+                message: None
+            }
+        ),
+        "{bare:?}"
+    );
+    assert_eq!(bare.to_string(), "Jira answered 404");
 }
 
 #[test]
@@ -1115,16 +1147,16 @@ fn every_page_of_notes_is_read_oldest_first() {
 
 #[test]
 fn a_key_the_site_does_not_hold_is_an_absence_and_no_comments_are_read() {
-    // The two shapes Jira's 404 arrives as, because `answer` keeps the prose
-    // and drops the code when a refusal carries any.
     for failure in [
-        Error::Refused {
+        Error::Absent {
             board: JIRA,
-            message: "Issue does not exist or you do not have permission to see it.".to_owned(),
+            message: Some(
+                "Issue does not exist or you do not have permission to see it.".to_owned(),
+            ),
         },
-        Error::Status {
+        Error::Absent {
             board: JIRA,
-            code: 404,
+            message: None,
         },
     ] {
         let said = failure.to_string();

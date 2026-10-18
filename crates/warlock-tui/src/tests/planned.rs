@@ -691,7 +691,7 @@ mod preparing {
         let error = refused(repo.path(), home.path(), SLUG, None, &Boarding::filing(""));
 
         assert!(
-            matches!(&error, Error::UnknownProject { slug, scope } if slug == SLUG && scope == SCOPE),
+            matches!(&error, Error::UnknownProject { board, slug, scope } if *board == "Linear" && slug == SLUG && scope == SCOPE),
             "{error:?}"
         );
         let message = said(&error);
@@ -3025,9 +3025,11 @@ mod jira {
         let (outcome, printed, jira) = dry_running(
             [
                 Ok(myself()),
-                Err(BoardError::Status {
+                Err(BoardError::Absent {
                     board: <JiraBoard as Board>::NAME,
-                    code: 404,
+                    message: Some(
+                        "Issue does not exist or you do not have permission to see it.".to_owned(),
+                    ),
                 }),
             ],
             NO_SUCH_BRIEF,
@@ -3038,7 +3040,7 @@ mod jira {
         // The absence rather than the 404: Jira's own words about the issue
         // never reach the reader, and the existing sentence is what does.
         assert!(
-            matches!(&error, Error::UnknownProject { slug, scope } if slug == NO_SUCH_BRIEF && scope == SCOPE),
+            matches!(&error, Error::UnknownProject { board, slug, scope } if *board == <JiraBoard as Board>::NAME && slug == NO_SUCH_BRIEF && scope == SCOPE),
             "{error:?}"
         );
         let message = said(&error);

@@ -418,7 +418,7 @@ impl<C: Calls> Board for Jira<C> {
             Value::Null,
         ) {
             Ok(issue) => issue,
-            Err(error) if unknown_issue(&error) => return Ok(None),
+            Err(Error::Absent { .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
 
@@ -586,8 +586,10 @@ impl<C: Calls> Board for Jira<C> {
 ///
 /// A success with an empty body is `Value::Null`: a transition answers 204 and
 /// an issue link 201, both with nothing after the headers, and reading either
-/// as JSON would fail a call that worked. A refusal is Jira's own words when
-/// the body carries any, and the bare status when it carries none.
+/// as JSON would fail a call that worked. A 404 is [`Error::Absent`] whatever
+/// the body says, so the status survives Jira's prose. Any other refusal is
+/// Jira's own words when the body carries any, and the bare status when it
+/// carries none.
 fn answer(status: u16, text: &str) -> Result<Value, Error> {
     if (200..300).contains(&status) {
         if text.trim().is_empty() {
@@ -599,10 +601,16 @@ fn answer(status: u16, text: &str) -> Result<Value, Error> {
         });
     }
 
-    match serde_json::from_str::<Value>(text)
+    let message = serde_json::from_str::<Value>(text)
         .ok()
-        .and_then(|body| refusal(&body))
-    {
+        .and_then(|body| refusal(&body));
+    if status == 404 {
+        return Err(Error::Absent {
+            board: JIRA,
+            message,
+        });
+    }
+    match message {
         Some(message) => Err(Error::Refused {
             board: JIRA,
             message,
@@ -675,27 +683,6 @@ fn browse(base_url: &str, key: &str) -> String {
 /// are read in the order a person wrote them.
 fn comments(key: &str, read: usize) -> String {
     format!("{ISSUE}/{key}/comment?startAt={read}&maxResults={COMMENTS_PAGE}&orderBy=created")
-}
-
-/// Whether a failed issue read is a key the site does not hold rather than a
-/// failure a person has to act on.
-///
-/// Read off the error because [`answer`] keeps Jira's prose and drops the code
-/// when a refusal carries any, so a 404 arrives as either shape depending on
-/// what the body said — the same fold `linear.rs`'s own `unknown_entity` makes,
-/// and for the same reason: a caller that had to recognise Jira's sentence
-/// itself would be reading the vendor's prose in a second place.
-///
-/// The phrase and not a bare "does not exist", which on this board is also how a
-/// site says an issue type or a field is not one it has: the sentence a GET of a
-/// missing issue answers names the issue, and a refusal about anything else
-/// stays a refusal in Jira's own words.
-fn unknown_issue(error: &Error) -> bool {
-    match error {
-        Error::Status { code: 404, .. } => true,
-        Error::Refused { message, .. } => message.to_lowercase().contains("issue does not exist"),
-        _ => false,
-    }
 }
 
 /// One issue's status as a read answers it: the name a refusal prints, and

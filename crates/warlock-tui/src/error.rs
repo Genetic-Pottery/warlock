@@ -183,7 +183,7 @@ pub enum Error {
         source: briefs::Error,
     },
     // The URL is the point of this refusal: a brief is filed once, so the
-    // answer to pushing it again is the address of the project it already made.
+    // answer to pushing it again is the address of what it already made.
     AlreadyFiled {
         name: String,
         url: String,
@@ -198,10 +198,12 @@ pub enum Error {
     Linear {
         source: BoardError,
     },
-    // The two refusals a cut has before it reads a slice: a slug the workspace
-    // does not have, and a project that is not planned. The scope rides along
-    // so the sentence can name the command that lists the right slugs.
+    // The two refusals a cut has before it reads a slice: a brief the board
+    // does not hold, and one that is not open for drafting. The scope rides
+    // along so the sentence can name the command that lists the right ones, and
+    // the board so it is not one vendor's name on every scope's refusal.
     UnknownProject {
+        board: &'static str,
         slug: String,
         scope: String,
     },
@@ -408,8 +410,8 @@ pub(crate) fn one_line(message: impl fmt::Display) -> String {
 fn already_filed_message(f: &mut fmt::Formatter<'_>, name: &str, url: &str) -> fmt::Result {
     write!(
         f,
-        "a project named `{name}` is already filed at {url}, so nothing was sent: a brief that \
-         changed after it was filed is edited on the project"
+        "a brief named `{name}` is already filed at {url}, so nothing was sent: a brief that \
+         changed after it was filed is edited where it was filed"
     )
 }
 
@@ -425,13 +427,18 @@ fn unknown_team_message(f: &mut fmt::Formatter<'_>, team: &str, path: &Path) -> 
     )
 }
 
-// The command that lists the slugs is the whole of the fix, so it is spelled out
-// with the scope already in it.
-fn unknown_project_message(f: &mut fmt::Formatter<'_>, slug: &str, scope: &str) -> fmt::Result {
+// The command that lists the briefs is the whole of the fix, so it is spelled
+// out with the scope already in it.
+fn unknown_project_message(
+    f: &mut fmt::Formatter<'_>,
+    board: &str,
+    slug: &str,
+    scope: &str,
+) -> fmt::Result {
     write!(
         f,
-        "Linear knows no project with the slug `{slug}`, so nothing was read: `warlock draft \
-         {scope}` lists the planned ones"
+        "{board} holds no brief `{slug}`, so nothing was read: `warlock draft {scope}` lists \
+         the planned ones"
     )
 }
 
@@ -762,7 +769,9 @@ impl fmt::Display for Error {
             // line, and what a socket failure carries is whatever the network
             // stack said.
             Self::Linear { source } => write!(f, "{}", one_line(source)),
-            Self::UnknownProject { slug, scope } => unknown_project_message(f, slug, scope),
+            Self::UnknownProject { board, slug, scope } => {
+                unknown_project_message(f, board, slug, scope)
+            }
             Self::NotPlanned { name, status } => not_planned_message(f, name, status.as_deref()),
             // The parser's own sentence and nothing around it, for `Brief`'s
             // reason: it names the heading the project is missing, or the

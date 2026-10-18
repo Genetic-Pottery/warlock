@@ -2113,7 +2113,7 @@ mod filing {
 
         assert!(!driven.cutter.fetching(), "the draft never reported");
         assert!(
-            said(&driven, "no project with the slug `9e41c07a2b13`"),
+            said(&driven, "holds no brief `9e41c07a2b13`"),
             "the thread does not carry the refusal: {:?}",
             notes(&driven)
         );

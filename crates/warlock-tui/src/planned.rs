@@ -700,6 +700,7 @@ pub(crate) fn prepare<O: Opens>(
     let project = board
         .fetch_brief(slug)?
         .ok_or_else(|| Error::UnknownProject {
+            board: board.vendor(),
             slug: slug.to_owned(),
             scope: scope.to_owned(),
         })?;

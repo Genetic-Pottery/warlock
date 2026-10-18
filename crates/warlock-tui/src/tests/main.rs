@@ -862,7 +862,7 @@ fn each_subcommands_help_says_what_that_subcommand_does() {
         ("close", "AI"),
         ("check", "scope"),
         ("scope", "scope"),
-        ("key", "Linear"),
+        ("key", "board keys"),
         // The two that reach a board say which direction they go in, because
         // that is the difference somebody typing one of them is choosing
         // between: a brief filed as a project, a project cut into tickets.
