@@ -661,6 +661,11 @@ impl<C: Calls> Board for Jira<C> {
     /// post, the move that cannot is two reads and nothing posted, and neither
     /// is retried.
     ///
+    /// A failure of that second read is a status left unnamed and not an error.
+    /// The move into review comes after the pull request is open, so failing the
+    /// verb here fails a run whose work is already up, over a word the line
+    /// would only have printed.
+    ///
     /// Never a second attempt at a status of another name: the caller asked for
     /// one column, and warlock picking a different one would be a ticket moved
     /// somewhere nobody asked for and a line saying it had not been.
@@ -670,7 +675,7 @@ impl<C: Calls> Board for Jira<C> {
         let Some(transition) = chosen(&offers, status) else {
             return Ok(Moved::Unreached {
                 reachable: offers.into_iter().map(|(_, name)| name).collect(),
-                standing: self.stands(issue)?.0,
+                standing: self.stands(issue).ok().and_then(|(name, _)| name),
             });
         };
 

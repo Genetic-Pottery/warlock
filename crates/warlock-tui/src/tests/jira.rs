@@ -3476,6 +3476,38 @@ fn a_workflow_reaching_no_status_of_that_name_names_what_it_reaches_and_where_th
 }
 
 #[test]
+fn a_status_read_that_fails_after_no_move_was_found_leaves_the_status_unnamed() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_default_workflow()),
+            Err(Error::Status {
+                board: JIRA,
+                code: 503,
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let answered = board
+        .move_ticket(TICKET, REVIEW)
+        .expect("the status read is not worth failing the run over");
+
+    assert_eq!(
+        answered,
+        Moved::Unreached {
+            reachable: vec![TO_DO.to_owned(), IN_PROGRESS.to_owned(), "Done".to_owned()],
+            standing: None,
+        }
+    );
+    assert_eq!(
+        board.calls.made(),
+        [offered(TICKET), status_of(TICKET)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
 fn a_refusal_with_no_reasons_is_its_status() {
     // A 401 from Jira, a proxy's HTML and an envelope with empty reasons all
     // name nothing warlock can pass on.
