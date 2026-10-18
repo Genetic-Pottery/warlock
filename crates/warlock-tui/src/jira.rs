@@ -21,8 +21,9 @@ use warlock_engine::{FiledTo, ScopeRecord};
 
 use crate::adf::{body_for, document_for};
 use crate::board::{
-    Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
-    NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket, SKIP_NOTE, TicketBrief,
+    Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket,
+    Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket, SKIP_NOTE,
+    TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
 use crate::queue::same_name;
@@ -118,6 +119,16 @@ const COMMENTS_PAGE: usize = 100;
 /// `fields` carries every field the site has, every custom one included, and
 /// three of them are the whole of what a draft reads.
 const BRIEF_FIELDS: &str = "summary,status,description";
+
+/// The fields a queued ticket is read out of, asked for by name for the reason
+/// [`BRIEF_FIELDS`] is: a search with no `fields` carries every field the site
+/// has, every custom one included, and a board with a hundred of them would
+/// answer a queue a hundred times the size of what is read.
+///
+/// `issuelinks` is one of them because what blocks a ticket is a field of the
+/// ticket: it is the whole of what [`blocking`] reads, and leaving it off is an
+/// answer in which every held-up ticket looks ready.
+const QUEUED_FIELDS: &[&str] = &["summary", "status", "description", "priority", "issuelinks"];
 
 /// The field a cut's pre-flight reads the Epic back for, which is one field
 /// because nothing of it is read: what the read answers is whether the Epic is
@@ -767,6 +778,19 @@ impl<C: Calls> Board for Jira<C> {
     /// refuses the search, as it does for a listing and for the same reason:
     /// Jira holds no such label, so a record naming one is a manifest to fix
     /// rather than a search to repair.
+    ///
+    /// What holds a ticket up rides back in the same answer, in the
+    /// `issuelinks` field asked for beside the four a ticket is read from, and
+    /// none of the clauses above reach it: an issue's links are a field *of*
+    /// the issue the search matched, so a ticket is held up by whatever blocks
+    /// it, whoever owns that and whatever label it carries. Which is the
+    /// asymmetry `linear.rs`'s own queue states and the point of it — the
+    /// filters make the queue, and a blocker must not inherit them.
+    ///
+    /// To the end as well, and that costs nothing here: Jira hands an issue's
+    /// links over as one whole field, with no token beside it and no page after
+    /// it, where Linear pages an issue's relations and has to be read on. A
+    /// blocker list cut off midway makes a held-up ticket look ready.
     fn scope_queue(&self, assignee: &str) -> Result<Queue, Error> {
         let (_, project_key) = self.site()?;
         let label = self.record.label();
@@ -775,7 +799,7 @@ impl<C: Calls> Board for Jira<C> {
         );
 
         let issues = self
-            .searched(&jql, &["summary", "status", "description", "priority"])?
+            .searched(&jql, QUEUED_FIELDS)?
             .iter()
             .map(queued)
             .collect::<Result<_, Error>>()?;
@@ -1218,9 +1242,6 @@ fn standing(status: Option<&Value>) -> (Option<String>, bool) {
 /// every judgement is made on. Both are read rather than defaulted — a ticket
 /// whose status an answer did not carry is bytes a proxy decided to send, and
 /// guessing a category for it would be guessing whether somebody is on it.
-///
-/// No blocker is read, because nothing here asks for an issue's links: a ticket
-/// this board hands up is held by nothing as far as choosing can tell.
 fn queued(issue: &Value) -> Result<QueuedTicket, Error> {
     let key = issue
         .get("key")
@@ -1254,7 +1275,87 @@ fn queued(issue: &Value) -> Result<QueuedTicket, Error> {
             .to_owned(),
         state_type: Category::of(category),
         priority: ranked(fields),
-        blockers: Vec::new(),
+        blockers: blocking(fields)?,
+    })
+}
+
+/// Every issue holding up the one these fields belong to, off its `issuelinks`.
+///
+/// Which side of a link the blocker is is the whole of what this reads, and it
+/// lives in which field is taken off the link. Jira holds a link as a thing
+/// between two issues and hands an issue the far side of each of its own:
+/// [`Board::create_relation`] writes the blocker as `inwardIssue` and the issue
+/// held up as `outwardIssue`, so on a held-up issue — which is what a queue read
+/// answers — a [`BLOCKS`] link carries `inwardIssue`, and that is the blocker.
+/// A [`BLOCKS`] link carrying `outwardIssue` is one of this issue's own: it says
+/// this ticket blocks that one, which holds nothing up on this side and is read
+/// and dropped. Taking the wrong one of the two compiles, answers the same shape
+/// and inverts every dependency in the queue.
+///
+/// Only a [`BLOCKS`] link at all: a `Relates`, a `Duplicate` or a clone link
+/// says nothing about what can be worked. A link carrying no type is an
+/// unreadable answer rather than one more link to drop, as it is on the other
+/// board — dropping it quietly is how a held-up ticket comes to look ready.
+///
+/// A ticket the field is absent from is a ticket with no links, which is a
+/// ticket nothing holds up: whether a site spells that an empty list or leaves
+/// the field out of the answer is the site's to decide, and the field is asked
+/// for by name on every page, so its absence is not a question the ticket was
+/// never asked. A link that did arrive is read strictly.
+fn blocking(fields: &Value) -> Result<Vec<Blocker>, Error> {
+    let Some(links) = fields.get("issuelinks") else {
+        return Ok(Vec::new());
+    };
+    let links = links.as_array().ok_or_else(|| missing("issuelinks"))?;
+    let mut blockers = Vec::new();
+
+    for link in links {
+        let relation = link
+            .get("type")
+            .and_then(|relation| relation.get("name"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("issuelinks.type.name"))?;
+
+        // `inwardIssue` and never `outwardIssue`, per the direction above.
+        if relation == BLOCKS
+            && let Some(blocker) = link.get("inwardIssue")
+        {
+            blockers.push(held_by(blocker)?);
+        }
+    }
+
+    Ok(blockers)
+}
+
+/// The far side of one [`BLOCKS`] link, which [`blocking`] has already decided
+/// is the issue doing the blocking, in the facts a refusal names it by.
+///
+/// The category and not the status name: whether a blocker is still in the way
+/// is the one judgement made of it, and `Done` on this project is `Shipped` on
+/// the next. Read rather than defaulted, for [`queued`]'s reason — a category
+/// guessed here is a guess about whether work can start.
+///
+/// No assignee, because the answer carries none: Jira puts `summary`, `status`,
+/// `priority` and `issuetype` on the far side of a link and nothing else, and
+/// naming the person would cost a read per blocker to print one word. A queue's
+/// refusal calls every Jira blocker unassigned.
+fn held_by(blocker: &Value) -> Result<Blocker, Error> {
+    let category = blocker
+        .get("fields")
+        .and_then(|fields| fields.get("status"))
+        .and_then(|status| status.get("statusCategory"))
+        .and_then(|category| category.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing("issuelinks.inwardIssue.status.statusCategory.key"))?;
+
+    Ok(Blocker {
+        identifier: blocker
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("issuelinks.inwardIssue.key"))?
+            .to_owned(),
+        assignee: None,
+        state_type: Category::of(category),
     })
 }
 
