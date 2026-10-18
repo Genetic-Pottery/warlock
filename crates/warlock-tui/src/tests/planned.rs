@@ -19,7 +19,7 @@ use super::{Planned, Settled, cut_with, listing, listing_lines, prepare};
 const ACCEPT: &str = "create";
 
 const SKIP: &str = "quit";
-use crate::adf::document_for;
+use crate::adf::{body_for, document_for};
 use crate::asking::Asks;
 use crate::board::{Board, Error as BoardError, FetchedBrief, Listing, Opens};
 use crate::brief::ScopeBlockError;
@@ -2822,17 +2822,20 @@ mod finishing {
     }
 }
 
-// The same dry run over a scope that files to Jira, driven through the very
-// board the opener would have built: what `mod headless` says about the Linear
-// arm, said again about the requests the Jira arm spells and the answers it
-// reads back out of them.
+// The same dry run — and the same whole cut — over a scope that files to Jira,
+// driven through the very board the opener would have built: what `mod headless`
+// says about the Linear arm, said again about the requests the Jira arm spells
+// and the answers it reads back out of them.
 //
 // Here rather than in `tests/jira.rs`, which drives one verb at a time: what
-// these are about is the order `prepare` asks in — the account, then the brief,
-// then the gate, then the `## Scope` parse, then the notes — and that nothing
-// but a read went out on the way.
+// these are about is the order the subcommand asks in — for a dry run the
+// account, then the brief, then the gate, then the `## Scope` parse, then the
+// notes, with nothing but a read going out on the way, and for a cut the
+// pre-flight, the creates, the links, the note and the Epic's move, each verb
+// handed what the one before it answered.
 mod jira {
     use super::*;
+    use crate::queue::IN_PROGRESS;
 
     // The key a person types, which is the whole address of the Epic: the
     // project key is `a_jira_record`'s, so a read addressed anywhere else is a
@@ -3149,5 +3152,253 @@ mod jira {
                 "{slice} is not in: {lines:?}"
             );
         }
+    }
+
+    // The issues the one uncut slice's two drafts become, by the keys the
+    // creates answer. Both are read back: the key is the whole of how this board
+    // names an issue, so the identifiers the cut prints, the ones its note
+    // records and the ones a link is written between are all these.
+    const CHILD: &str = "PAY-20";
+
+    const HELD_UP: &str = "PAY-21";
+
+    // What an earlier run already filed the first slice as, which is in the
+    // Epic's notes rather than in anything this run sends.
+    const ALREADY: &str = "PAY-10";
+
+    // The record's project as the pre-flight's first read answers it: the
+    // statuses grouped by issue type, one of them in the category a ticket
+    // nobody has started belongs in. Which shapes of that answer are read the
+    // same way is `tests/jira.rs`'s own assertion; this is a project a cut can
+    // file into.
+    fn a_filable_project() -> Value {
+        json!([{
+            "id": "10001",
+            "name": "Task",
+            "statuses": [
+                { "name": TO_DO, "statusCategory": { "key": "new" } },
+                { "name": IN_DEV, "statusCategory": { "key": "indeterminate" } },
+            ],
+        }])
+    }
+
+    // The Epic as the pre-flight's own read answers it, which asks for the
+    // summary alone: the key it spells back is the one every child is filed
+    // under.
+    fn reachable() -> Value {
+        json!({ "id": "10042", "key": BRIEF, "fields": { "summary": NAME } })
+    }
+
+    // One child as its create answers it. The numeric id beside the key is read
+    // by nothing, and it is here because a real answer carries one.
+    fn filed(key: &str) -> Value {
+        json!({ "id": "10050", "key": key })
+    }
+
+    // And as the status read after it answers: the workflow opened the child in
+    // a `new` category, so nothing is spent moving it and the cut's order holds
+    // no transition per child.
+    fn landed(key: &str) -> Value {
+        json!({
+            "key": key,
+            "fields": { "status": { "name": TO_DO, "statusCategory": { "key": "new" } } },
+        })
+    }
+
+    // What the Epic's workflow offers once every slice is settled, each
+    // transition by its own id and the status its `to` lands in. The move is
+    // chosen on the name the cut asked for, so that name is on one of them.
+    fn a_default_workflow() -> Value {
+        json!({
+            "transitions": [
+                { "id": "11", "to": { "name": TO_DO, "statusCategory": { "key": "new" } } },
+                {
+                    "id": "21",
+                    "to": {
+                        "name": IN_PROGRESS,
+                        "statusCategory": { "key": "indeterminate" },
+                    },
+                },
+            ],
+        })
+    }
+
+    // The Epic a cut reaches with one slice left: the first filed by an earlier
+    // run and the second skipped in one, so settling the third finishes the
+    // brief and the move is asked for.
+    fn two_slices_settled() -> Value {
+        commented(&[&a_cut(FIRST, &[ALREADY]), &a_skip(SECOND)])
+    }
+
+    // Every answer one whole cut of that slice is given, in the order the verbs
+    // ask: the three reads a dry run makes, then the pre-flight's two, then a
+    // create and a status read per draft, the link, the note and the Epic's
+    // move.
+    //
+    // A request the list has run out of answers for panics the stand-in, which
+    // is how "one request per mutation and no retry" is asserted here.
+    fn answers() -> Vec<Result<Value, BoardError>> {
+        vec![
+            Ok(myself()),
+            Ok(a_draftable_epic()),
+            Ok(two_slices_settled()),
+            Ok(a_filable_project()),
+            Ok(reachable()),
+            Ok(filed(CHILD)),
+            Ok(landed(CHILD)),
+            Ok(filed(HELD_UP)),
+            Ok(landed(HELD_UP)),
+            // A link create answers 201 with nothing after its headers.
+            Ok(Value::Null),
+            Ok(json!({ "id": "10100" })),
+            Ok(a_default_workflow()),
+            // And a transition 204 with nothing either.
+            Ok(Value::Null),
+        ]
+    }
+
+    // Every request one whole cut makes, spelled out rather than built from the
+    // module's own constants, for the reason `reads` is: a path moving, a POST
+    // where a GET was or a fourteenth request appearing is a failure here.
+    //
+    // This is the order the ticket promises — the pre-flight, one create per
+    // draft, the links, the comment, then the Epic's move — and the only place
+    // it is asserted as one order rather than one verb at a time.
+    fn spelled() -> Vec<(Method, String)> {
+        let mut spelled = reads(BRIEF);
+        spelled.extend([
+            // The pre-flight: the project before the Epic, and nothing sent
+            // until both answered.
+            (
+                Method::GET,
+                format!("/rest/api/3/project/{PROJECT}/statuses"),
+            ),
+            (
+                Method::GET,
+                format!("/rest/api/3/issue/{BRIEF}?fields=summary"),
+            ),
+            // One create per draft, each followed by the one read that says
+            // where the workflow opened the child.
+            (Method::POST, "/rest/api/3/issue".to_owned()),
+            (
+                Method::GET,
+                format!("/rest/api/3/issue/{CHILD}?fields=status"),
+            ),
+            (Method::POST, "/rest/api/3/issue".to_owned()),
+            (
+                Method::GET,
+                format!("/rest/api/3/issue/{HELD_UP}?fields=status"),
+            ),
+            // Then the slice's one edge, after both creates and never between
+            // them: a link can only be written between two issues that exist.
+            (Method::POST, "/rest/api/3/issueLink".to_owned()),
+            // Then the note, which is what makes the slice cut for the next run.
+            (Method::POST, format!("/rest/api/3/issue/{BRIEF}/comment")),
+            // And last the Epic's move, read then posted.
+            (
+                Method::GET,
+                format!("/rest/api/3/issue/{BRIEF}/transitions"),
+            ),
+            (
+                Method::POST,
+                format!("/rest/api/3/issue/{BRIEF}/transitions"),
+            ),
+        ]);
+        spelled
+    }
+
+    // The whole subcommand as a cut rather than a dry run, which `cut_to`
+    // cannot drive: its models panic when they are turned. One slice is left to
+    // cut, so one session is scripted and nothing proposes — a run that reached
+    // the proposing stand-in panics rather than passing — and every review is
+    // accepted, because nothing reaches the board until somebody says so.
+    fn cutting_the_last_slice(
+        answers: impl IntoIterator<Item = Result<Value, BoardError>>,
+    ) -> (Result<(), Error>, String, Opening) {
+        let repo = a_jira_repository();
+        let home = a_home(repo.path());
+        let jira = Opening::answering(answers);
+
+        let (outcome, printed) = cutting(
+            repo.path(),
+            home.path(),
+            BRIEF,
+            None,
+            false,
+            &jira,
+            &Scripted::saying([Answering::drafts(THIRD)]),
+            &Scripted::saying([]),
+            &mut accepting(),
+        );
+
+        (outcome, printed, jira)
+    }
+
+    #[test]
+    fn a_whole_cut_asks_the_pre_flight_the_creates_the_links_the_note_then_the_move() {
+        let (outcome, printed, jira) = cutting_the_last_slice(answers());
+
+        outcome.expect("a slice that files");
+        assert_eq!(jira.spelled(), spelled(), "{:?}", jira.made());
+        // The board is opened once to prepare the run and once to file the
+        // slice, both with the value out of the key store: the ordering a
+        // refusal at the door would have shown is that nothing was sent before
+        // either.
+        assert_eq!(jira.opened_with(), [NOT_A_KEY, NOT_A_KEY]);
+        // The key value reaches the client and nothing else, here as everywhere.
+        assert!(!printed.contains(NOT_A_KEY), "{printed}");
+    }
+
+    #[test]
+    fn the_identifiers_the_cut_printed_are_the_keys_the_creates_answered() {
+        let (outcome, printed, _) = cutting_the_last_slice(answers());
+
+        outcome.expect("a slice that files");
+        let lines = lines(&printed);
+        // The two keys the site answered with, in the order the drafts were
+        // filed, and the title the slice was cut under: identifiers are the one
+        // thing a cut must not lose, so they are said whatever happens next.
+        assert!(
+            lines.contains(&format!("cut `{THIRD}` into `{CHILD}`, `{HELD_UP}`")),
+            "{lines:?}"
+        );
+        // The two slices an earlier run settled are said off the Epic's own
+        // notes and nothing at all was sent for either.
+        assert!(
+            lines[placed(&lines, FIRST)].contains(&format!("already cut as `{ALREADY}`")),
+            "{lines:?}"
+        );
+        assert!(
+            lines[placed(&lines, SECOND)].contains("skipped in an earlier run"),
+            "{lines:?}"
+        );
+        // And the Epic moved, because settling the third slice left nothing to
+        // draft: the line a Linear workspace earns for the same answer.
+        assert_eq!(lines.last().map(String::as_str), Some(MOVED), "{lines:?}");
+    }
+
+    #[test]
+    fn the_note_the_cut_wrote_reads_back_as_the_slice_and_the_issues_it_became() {
+        let (outcome, _, jira) = cutting_the_last_slice(answers());
+
+        outcome.expect("a slice that files");
+        // The comment is the whole ledger: it is read back out of the very ADF
+        // body that went to the board, through the reader `fetch_brief` reads
+        // its notes with and the parser `prepare` settles them with, so a body
+        // this run wrote and a later run could not read would fail here.
+        let notes: Vec<String> = jira
+            .made()
+            .into_iter()
+            .filter(|(method, path, _)| {
+                *method == Method::POST && path == &format!("/rest/api/3/issue/{BRIEF}/comment")
+            })
+            .map(|(_, _, body)| body_for(&body["body"]))
+            .collect();
+
+        assert_eq!(
+            noted(&notes),
+            [(folded(THIRD), vec![CHILD.to_owned(), HELD_UP.to_owned()])],
+            "{notes:?}"
+        );
     }
 }
