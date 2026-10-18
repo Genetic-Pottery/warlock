@@ -268,7 +268,13 @@ impl<P: Posts> Board for Linear<P> {
     /// for is [`Filable::NoDestination`] with the states never asked for, and a
     /// team with no `Backlog` is [`Filable::NoColumn`]. Neither sends a
     /// mutation.
-    fn ticket_filing(&self) -> Result<Filable<Resolved>, Error> {
+    ///
+    /// The brief is not read and nothing here asks about it: an issue carries
+    /// its project as a field of its own, so where a cut files says nothing
+    /// about the team a ticket is created on or the state a fresh one lands in.
+    /// A project the workspace does not hold is the create's own refusal in
+    /// Linear's words, as it was before this verb was told anything.
+    fn ticket_filing(&self, _brief: &str) -> Result<Filable<Resolved>, Error> {
         let Some(team) = team_id(&self.posts, self.scope()?.ticket_prefix())? else {
             return Ok(Filable::NoDestination);
         };

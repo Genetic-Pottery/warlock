@@ -1043,8 +1043,8 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.create_brief(project))
     }
 
-    fn ticket_filing(&self) -> Result<Filable<B::Filing>, BoardError> {
-        self.asked(Board::ticket_filing)
+    fn ticket_filing(&self, brief: &str) -> Result<Filable<B::Filing>, BoardError> {
+        self.asked(|board| board.ticket_filing(brief))
     }
 
     fn create_ticket(
