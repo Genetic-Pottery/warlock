@@ -45,7 +45,7 @@ use warlock_engine::{
     BoardScope, Manifest, PullRun, PullSubtask, RunStatus, SubtaskStatus, now_rfc3339, pulls,
 };
 
-use crate::board::{Board, Category, Error as BoardError};
+use crate::board::{Board, Category, Error as BoardError, Moved};
 use crate::claude::{Activity, Sibling, Split, Worked, working_opening};
 use crate::crossings::{Crossing, crossings_after};
 use crate::git::{
@@ -541,17 +541,37 @@ impl<B: Board, R: Repository, F: Forge, S: Splits, W: Works> Pulling<'_, B, R, F
 
     fn move_to_review(&mut self, ticket: &Ticket<'_>) -> Result<(), Error> {
         let review = self.scope.review_state();
-        if !self
+        match self
             .board
             .move_ticket(ticket.id, review)
             .map_err(Error::board)?
-            .reached()
         {
-            self.report(PullEvent::NoReviewState {
-                team: self.scope.ticket_prefix().to_owned(),
-                state: review.to_owned(),
-            });
-            return Ok(());
+            Moved::Reached => {}
+            // A board that named neither where the ticket stands nor where it
+            // could go failed to find a status and never asked the ticket
+            // anything, so there is nothing to say past the name it looked for.
+            Moved::Unreached {
+                reachable,
+                standing,
+            } if reachable.is_empty() && standing.is_none() => {
+                self.report(PullEvent::NoReviewState {
+                    team: self.scope.ticket_prefix().to_owned(),
+                    state: review.to_owned(),
+                });
+                return Ok(());
+            }
+            Moved::Unreached {
+                reachable,
+                standing,
+            } => {
+                self.report(PullEvent::ReviewNotReached {
+                    scope: self.scope.name().to_owned(),
+                    state: review.to_owned(),
+                    standing,
+                    reachable,
+                });
+                return Ok(());
+            }
         }
         if let Some(line) = project_review(self.board, ticket.id, review) {
             self.report(PullEvent::Project { line });
@@ -861,6 +881,24 @@ pub(crate) enum PullEvent {
         team: String,
         state: String,
     },
+    /// The ticket did not reach the scope's review state, and the board named
+    /// where it stayed and the statuses it could have gone to instead — which
+    /// [`NoReviewState`] has neither of.
+    ///
+    /// Two variants rather than one worded around an absent standing and an
+    /// empty list, because the two lines are read by people in different
+    /// positions: a review state nobody has created is a workspace to go and fix,
+    /// where a review state the ticket cannot be transitioned into from where it
+    /// stands is a workflow to go and look at, and the statuses it offers instead
+    /// are the whole of what says which.
+    ///
+    /// [`NoReviewState`]: Self::NoReviewState
+    ReviewNotReached {
+        scope: String,
+        state: String,
+        standing: Option<String>,
+        reachable: Vec<String>,
+    },
     /// What became of the ticket's project once the ticket reached review,
     /// worded here because both doors say it the same way.
     Project {
@@ -876,6 +914,31 @@ fn no_review_state(team: &str, state: &str) -> String {
     format!("the team `{team}` has no `{state}` state, so the ticket was not moved into review")
 }
 
+fn review_not_reached(
+    scope: &str,
+    state: &str,
+    standing: Option<&str>,
+    reachable: &[String],
+) -> String {
+    let from = standing.map_or_else(
+        || "a status the board did not name".to_owned(),
+        |status| format!("`{status}`"),
+    );
+    let into = if reachable.is_empty() {
+        "nothing".to_owned()
+    } else {
+        reachable
+            .iter()
+            .map(|status| format!("`{status}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "the scope `{scope}` records `{state}` as its review state, and the ticket was not moved \
+         into review: it stands in {from}, which reaches {into}"
+    )
+}
+
 impl PullEvent {
     /// The line both doors say, or `None` for an activity, which each words for
     /// itself.
@@ -886,6 +949,17 @@ impl PullEvent {
             Self::Repair { note } => Some(note.clone()),
             Self::NoStartState { team } => Some(no_start_state(team)),
             Self::NoReviewState { team, state } => Some(no_review_state(team, state)),
+            Self::ReviewNotReached {
+                scope,
+                state,
+                standing,
+                reachable,
+            } => Some(review_not_reached(
+                scope,
+                state,
+                standing.as_deref(),
+                reachable,
+            )),
             Self::Project { line } => Some(line.clone()),
         }
     }

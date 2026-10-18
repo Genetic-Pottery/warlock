@@ -515,6 +515,14 @@ pub(crate) struct Boarding {
     ///
     /// [`without_states`]: Boarding::without_states
     state: Option<String>,
+    /// Where a ticket move that reaches nothing leaves the ticket, and the
+    /// statuses it could have reached instead: what a board built
+    /// [`standing_in`] answers every ticket move with, however many states this
+    /// workspace holds, as a Jira workflow with no transition into the status
+    /// asked for answers one.
+    ///
+    /// [`standing_in`]: Boarding::standing_in
+    standing: Option<(String, Vec<String>)>,
     project: Option<FetchedBrief>,
     /// What [`Board::planned_briefs`] answers with, empty until a test says
     /// otherwise.
@@ -663,6 +671,7 @@ impl Boarding {
             brief_statuses: true,
             ticket_brief: None,
             state: Some("state-backlog".to_owned()),
+            standing: None,
             project: None,
             listing: Listing::default(),
             same_name: None,
@@ -798,6 +807,23 @@ impl Boarding {
     /// whatever name it asks for.
     pub(crate) fn without_states(mut self) -> Self {
         self.state = None;
+        self
+    }
+
+    /// A board whose every ticket move reaches nothing and says so the way a
+    /// Jira workflow does: the ticket left standing in `status`, and `reachable`
+    /// the statuses it could have gone to from there.
+    ///
+    /// Beside [`without_states`] rather than inside it, because the two answers
+    /// are different lines: that one is a workspace with no status of the name
+    /// at all, naming neither where the ticket is nor where it could go.
+    ///
+    /// [`without_states`]: Boarding::without_states
+    pub(crate) fn standing_in(mut self, status: impl Into<String>, reachable: &[&str]) -> Self {
+        self.standing = Some((
+            status.into(),
+            reachable.iter().map(|name| (*name).to_owned()).collect(),
+        ));
         self
     }
 
@@ -1002,19 +1028,24 @@ impl Board for Boarding {
     /// from the answer. A board built [`without_states`] has no states, so
     /// every move answers that there is no status of that name — naming none it
     /// could have reached and no standing, as the Linear board it stands in for
-    /// answers one.
+    /// answers one; a board built [`standing_in`] answers instead the way a Jira
+    /// workflow does, with both.
     ///
     /// [`without_states`]: Boarding::without_states
+    /// [`standing_in`]: Boarding::standing_in
     fn move_ticket(&self, issue: &str, status: &str) -> Result<Moved, BoardError> {
         self.ask(Call::MoveTicket {
             issue: issue.to_owned(),
             status: status.to_owned(),
         })?;
 
-        if self.state.is_some() {
-            Ok(Moved::Reached)
-        } else {
-            Ok(Moved::unreached())
+        match &self.standing {
+            Some((standing, reachable)) => Ok(Moved::Unreached {
+                reachable: reachable.clone(),
+                standing: Some(standing.clone()),
+            }),
+            None if self.state.is_some() => Ok(Moved::Reached),
+            None => Ok(Moved::unreached()),
         }
     }
 
