@@ -3,7 +3,7 @@ use std::io;
 
 use serde_json::{Value, json};
 use ureq::http::Method;
-use warlock_engine::ScopeRecord;
+use warlock_engine::{BoardScope, ScopeRecord};
 
 use super::{
     Calls, Client, EMAIL_TOKEN, JIRA, Jira, REQUEST_TIMEOUT, Settled, answer, authorization,
@@ -16,7 +16,7 @@ use crate::board::{
 };
 use crate::brief::{Slice, scope_block_in};
 use crate::cut;
-use crate::queue::IN_PROGRESS;
+use crate::queue::{IN_PROGRESS, Named, Refusal, take_named};
 use crate::stubs::Calling;
 
 const EMAIL: &str = "nobody@example.com";
@@ -3694,6 +3694,127 @@ fn a_named_answer_missing_any_fact_a_refusal_names_is_malformed() {
         );
         assert_eq!(board.calls.made().len(), 1, "no retry and no second read");
     }
+}
+
+/// `PAY-31` taken or turned down, with the scope read off the very record the
+/// board was opened for.
+///
+/// The whole point of the three reads below is that nothing about the project,
+/// the label or the account reaches the request: the read is unfiltered, and
+/// the judgement is made here over facts the site stated. So the same
+/// [`a_scope`] record is both halves — what the board builds a key from and
+/// what a refusal names — and the account is the one the key authenticates as.
+fn taking(issue: Value) -> (Jira<Calling>, Named) {
+    let record = a_scope();
+    let board = Jira::new(Calling::answering([Ok(issue)]), record.clone());
+
+    let named = take_named(&board, BoardScope::of(&record), ACCOUNT, TICKET, &[])
+        .expect("the stand-in answered");
+
+    (board, named)
+}
+
+/// The printable reason `PAY-31` was turned down, which is what each refusal
+/// below is asserted as: the words are [`crate::queue`]'s own, shared with the
+/// Linear arm, and no Jira spelling of them exists to drift.
+fn turned_down(named: &Named) -> String {
+    match named {
+        Named::Refused(refused) => refused.to_string(),
+        Named::Taken(issue) => panic!("{} was taken", issue.identifier()),
+    }
+}
+
+#[test]
+fn a_named_jira_ticket_inside_the_scope_is_taken() {
+    let (board, named) = taking(a_ticket_of_this_scope());
+
+    // The control the three refusals below are read against: everything about
+    // this ticket is the record's, so each of them fails on the one fact it
+    // changes.
+    assert!(
+        matches!(&named, Named::Taken(issue) if issue.identifier() == TICKET),
+        "{named:?}"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "one request");
+}
+
+#[test]
+fn a_named_ticket_in_another_project_is_refused_naming_both_projects() {
+    let mut elsewhere = a_ticket_of_this_scope();
+    // The project the answer states, not the prefix that was typed: `PAY-31`
+    // is what was asked for, and the site answered with an issue filed under
+    // `ENG`.
+    elsewhere["fields"]["project"] = json!({ "id": "10001", "key": "ENG" });
+
+    let (board, named) = taking(elsewhere);
+
+    assert!(
+        matches!(&named, Named::Refused(Refusal::NotOnTeam { team, found })
+            if team == PROJECT && found == "ENG"),
+        "{named:?}"
+    );
+    assert_eq!(
+        turned_down(&named),
+        "on team `ENG`, and this scope routes to `PAY`"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "no second request");
+}
+
+#[test]
+fn a_named_ticket_without_the_records_label_is_refused_naming_the_label_it_wants() {
+    let mut unlabelled = a_ticket_of_this_scope();
+    unlabelled["fields"]["labels"] = json!(["area/web", "chore"]);
+
+    let (board, named) = taking(unlabelled);
+
+    // What it carries as well as what it is missing: the usual cause is a near
+    // miss rather than a ticket nobody labelled.
+    assert!(
+        matches!(&named, Named::Refused(Refusal::Unlabelled { label, carried })
+            if label == LABEL && carried == &["area/web", "chore"]),
+        "{named:?}"
+    );
+    assert_eq!(
+        turned_down(&named),
+        "not labelled `area/pay` — it carries area/web, chore"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "no second request");
+
+    let (bare, carrying_none) = taking(a_named_ticket(
+        PROJECT,
+        json!([]),
+        json!({ "accountId": ACCOUNT, "displayName": HOLDER }),
+    ));
+
+    assert_eq!(
+        turned_down(&carrying_none),
+        "not labelled `area/pay` — it carries no labels at all"
+    );
+    assert_eq!(bare.calls.made(), [by_key(TICKET)], "no second request");
+}
+
+#[test]
+fn a_named_ticket_somebody_else_holds_is_refused_naming_them() {
+    let mut theirs = a_ticket_of_this_scope();
+    // A different `accountId` under a display name the site holds: the id is
+    // what the check is made on, and the name is the half that gets printed.
+    theirs["fields"]["assignee"] = json!({
+        "accountId": "5b10a2844c20165700ede000",
+        "displayName": "Somebody Else",
+    });
+
+    let (board, named) = taking(theirs);
+
+    assert!(
+        matches!(&named, Named::Refused(Refusal::NotYours { holder })
+            if holder.as_deref() == Some("Somebody Else")),
+        "{named:?}"
+    );
+    assert_eq!(
+        turned_down(&named),
+        "assigned to Somebody Else and not to you"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "no second request");
 }
 
 /// The status a record names as the one a ticket in review belongs in, which is
