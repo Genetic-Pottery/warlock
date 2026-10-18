@@ -1000,32 +1000,39 @@ mod listing {
     }
 
     #[test]
-    fn a_jira_scope_is_refused_by_the_board_verb_s_own_sentence_with_nothing_sent() {
+    fn a_jira_scope_answers_the_epics_its_search_found_by_key() {
         let repo = a_jira_repository();
         let home = a_home(repo.path());
         let standing = Standing::at(repo.path().to_path_buf(), repo.path().to_path_buf());
-        // Nothing written down, so a request that reached the transport panics
-        // the stand-in rather than being asserted about afterwards.
-        let jira = Opening::answering([]);
+        // One page and no token after it. What the search asks for is
+        // `tests/jira.rs`'s business; what this says is that the flow reaches
+        // it at all and hands back what it answered.
+        let jira = Opening::answering([Ok(json!({
+            "issues": [{ "key": "PAY-14", "fields": { "summary": NAME } }],
+        }))]);
 
-        let error = listing(
+        let (destination, listed) = listing(
             &standing.manifest().expect("a manifest"),
             repo.path(),
             home.path(),
             SCOPE,
             &jira,
         )
-        .expect_err("a scope that files to Jira");
+        .expect("a listing");
 
-        // The board's own refusal for a verb no slice has written for it, and
-        // not a door check ahead of the board: the key was read and a client
-        // built, and the first call is what refused.
-        assert_eq!(
-            said(&error),
-            "warlock cannot list the planned briefs on a Jira scope yet, so nothing was sent"
-        );
+        // The project key the record names, which is the prefix of every key
+        // listed under it, and the Epic by that key rather than by a slug.
+        assert_eq!(destination.ticket_prefix(), PROJECT);
+        assert_eq!(listed, Listing::new(&[("PAY-14", NAME)]));
+        // The key was read and a client built before the one request, which is
+        // a POST carrying the JQL.
         assert_eq!(jira.opened_with(), [NOT_A_KEY]);
-        assert!(jira.made().is_empty(), "{:?}", jira.made());
+        assert_eq!(
+            jira.spelled(),
+            [(Method::POST, "/rest/api/3/search/jql".to_owned())],
+            "{:?}",
+            jira.made()
+        );
     }
 
     #[test]

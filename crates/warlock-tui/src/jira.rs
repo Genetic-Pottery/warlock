@@ -53,6 +53,17 @@ const MYSELF: &str = "/rest/api/3/myself";
 /// second spelling.
 const EPIC: &str = "Epic";
 
+/// Jira's own key for the status category an Epic is still open for drafting
+/// in, written into the JQL a listing narrows by.
+///
+/// The key and not a status name: what a site calls the column — `To Do` on one
+/// board and `Triage` on the next — is the site's word, and the category Jira
+/// files that status under is the one vocabulary every board shares. It is the
+/// word [`Category::of`] reads as [`Category::New`], which is the same
+/// judgement [`standing`] makes of an Epic a draft has already fetched, so the
+/// listing offers exactly the briefs the fetch after it calls draftable.
+const PLANNED: &str = "new";
+
 /// Issues read per page of a JQL search. Not left off: an answer with no
 /// `maxResults` takes whatever default the site has today.
 const SEARCH_PAGE: usize = 100;
@@ -202,11 +213,12 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but the two a push makes — the brief-by-name lookup and the brief
-/// create — and the two reads a cut asks first, for whose key it is and for the
-/// brief itself, refuses as this stands: the requests themselves arrive a slice
-/// at a time, and a board that refuses is what keeps a flow which reaches a verb
-/// nobody has written yet a sentence rather than a panic.
+/// Every verb but five refuses as this stands: the two a push makes, the
+/// brief-by-name lookup and the brief create; the two a cut reads first, for
+/// whose key it is and for the brief itself; and the listing a bare `warlock
+/// draft` prints. The requests themselves arrive a slice at a time, and a board
+/// that refuses is what keeps a flow which reaches a verb nobody has written yet
+/// a sentence rather than a panic.
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
@@ -449,8 +461,53 @@ impl<C: Calls> Board for Jira<C> {
         }))
     }
 
+    /// The Epics in the project that carry the record's label and sit in a
+    /// status category nobody has started, by key and summary, every page of
+    /// them: what a bare `warlock draft <scope>` prints as the briefs there are
+    /// slices left to cut from.
+    ///
+    /// The key where the Linear arm answers a slug, because the key is the
+    /// whole address of an Epic: what a listing prints is what
+    /// [`fetch_brief`](Self::fetch_brief) takes next, so the word on the line is
+    /// the word a person types into `warlock draft <scope> <key>`.
+    ///
+    /// The JQL is the whole filter and nothing re-reads it here, as the Linear
+    /// arm's own filter is its query. The label narrows it to what a push
+    /// filed, which is what a draft can read: an Epic somebody made by hand has
+    /// no `## Scope` warlock wrote the shape of. [`PLANNED`] narrows it to work
+    /// nobody has begun — an Epic in `indeterminate` or in `done` is not fresh
+    /// work to file slices against, and neither ever arrives.
+    ///
+    /// A label carrying a double quote would end the quoted JQL value early and
+    /// Jira would refuse the search in its own words. Nothing is escaped on the
+    /// way: Jira holds no such label, so a record naming one is a manifest to
+    /// fix rather than a search to repair.
     fn planned_briefs(&self) -> Result<Listing, Error> {
-        self.untaught("list the planned briefs")
+        let (_, project_key) = self.site()?;
+        let label = self.record.label();
+        let jql = format!(
+            r#"project = {project_key} AND issuetype = {EPIC} AND labels = "{label}" AND statusCategory = {PLANNED}"#
+        );
+
+        let projects = self
+            .searched(&jql, &["summary"])?
+            .iter()
+            .map(|issue| {
+                let key = issue
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| missing("key"))?;
+                let summary = issue
+                    .get("fields")
+                    .and_then(|fields| fields.get("summary"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| missing("summary"))?;
+
+                Ok((key.to_owned(), summary.to_owned()))
+            })
+            .collect::<Result<_, Error>>()?;
+
+        Ok(Listing { projects })
     }
 
     /// The URL of the Epic in this project with this name, or `None` when the
