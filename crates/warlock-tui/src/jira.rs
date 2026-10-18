@@ -553,6 +553,32 @@ impl<C: Calls> Jira<C> {
             .map(drop)
     }
 
+    /// One comment said on one issue, whichever issue it is: the body as the ADF
+    /// document a comment goes up as, posted to that issue's comment collection.
+    ///
+    /// The Epic's notes and a ticket's account of a run are the same request on
+    /// this board — an Epic is an issue — so the two verbs that call this exist
+    /// to let a caller's choice of name decide which object is commented on, as
+    /// `linear.rs`'s pair does, rather than the key spelled in a JSON literal.
+    ///
+    /// The comment's own id rides back, and the empty string when the answer
+    /// carries none: no caller reads either, and a note that landed is not worth
+    /// refusing over a field nothing asks for.
+    fn note(&self, key: &str, body: &str) -> Result<String, Error> {
+        self.site()?;
+        let comment = self.calls.call(
+            Method::POST,
+            &said(key),
+            json!({ "body": document_for(body) }),
+        )?;
+
+        Ok(comment
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned())
+    }
+
     /// The refusal of a verb no slice has written for this board yet, with
     /// nothing sent through [`Calls`].
     ///
@@ -1188,22 +1214,22 @@ impl<C: Calls> Board for Jira<C> {
     /// reads either, and a note that landed is not worth refusing over a field
     /// nothing asks for.
     fn comment_on_brief(&self, project: &str, body: &str) -> Result<String, Error> {
-        self.site()?;
-        let comment = self.calls.call(
-            Method::POST,
-            &said(project),
-            json!({ "body": document_for(body) }),
-        )?;
-
-        Ok(comment
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned())
+        self.note(project, body)
     }
 
-    fn comment_on_ticket(&self, _issue: &str, _body: &str) -> Result<String, Error> {
-        self.untaught("comment on a ticket")
+    /// Say what a run did on the ticket it ran, as a comment carrying the body
+    /// as an ADF document.
+    ///
+    /// The only account of a stop that reaches anybody who is not at the
+    /// terminal: `pulling.rs` halts by writing the run's record and then saying
+    /// this, and a run that left the base branch unchanged says that here too.
+    ///
+    /// One request and no retry, per this module's rule, and here that rule has
+    /// teeth: a comment is not idempotent, so a retried comment is how one halt
+    /// gets explained twice on the same ticket. A comment that did not land is a
+    /// line to print, and the record is already on disk.
+    fn comment_on_ticket(&self, issue: &str, body: &str) -> Result<String, Error> {
+        self.note(issue, body)
     }
 }
 

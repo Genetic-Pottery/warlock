@@ -467,22 +467,23 @@ fn a_jira_workflow() -> Value {
 }
 
 #[test]
-fn a_pull_over_a_jira_scope_moves_its_ticket_by_transition_and_stops_at_the_first_unwritten_verb() {
+fn a_pull_over_a_jira_scope_moves_its_ticket_by_transition_and_says_its_halt_on_the_ticket() {
     let ground = Ground::jira();
     let prepared = ground.prepared();
     let repo = Checkout::clean(DEFAULT);
-    // Whose key it is, the scope's queue, then the moves the chosen ticket
-    // offers and the one of them that is spent: selection asks for the account
-    // before anything else, chooses out of what the search answers, and the run
-    // puts the ticket it took in progress before it splits anything. A fifth
-    // request would panic the stand-in rather than being asserted about
-    // afterwards.
+    // Whose key it is, the scope's queue, the moves the chosen ticket offers and
+    // the one of them that is spent, then the halt's comment: selection asks for
+    // the account before anything else, chooses out of what the search answers,
+    // and the run puts the ticket it took in progress before it splits anything.
+    // A sixth request would panic the stand-in rather than being asserted about
+    // afterwards, which is how "a halt leaves exactly one comment" is said here.
     let jira = Opening::answering([
         Ok(json!({ "accountId": ACCOUNT })),
         Ok(a_jira_queue()),
         Ok(a_jira_workflow()),
         // A transition answers 204 with nothing after the headers.
         Ok(Value::Null),
+        Ok(json!({ "id": "10200" })),
     ]);
     // A split that halts, so the run reaches the comment a halt says on its
     // ticket without raising a session, which this test writes no answer for.
@@ -502,16 +503,22 @@ fn a_pull_over_a_jira_scope_moves_its_ticket_by_transition_and_stops_at_the_firs
         false,
     );
 
-    // The halt's comment, which is the first verb past the move that warlock has
-    // no request for on this board, refused in the board's own words.
-    let error = outcome.expect_err("a Jira board cannot comment on a ticket yet");
+    // The halt itself, which is not the loop failing: the comment landed on the
+    // ticket and the line points at it.
+    let error = outcome.expect_err("a halted run is reported as one");
     assert_eq!(
         error.to_string(),
-        "warlock cannot comment on a ticket on a Jira scope yet, so nothing was sent"
+        format!(
+            "the run for `{JIRA_TICKET}` halted, so the ticket stays in progress and was not \
+             moved to review: its comment lists what finished and what did not, and `warlock \
+             resume {JIRA_TICKET}` releases it"
+        )
     );
-    // All four requests went out, in that order: the account, the queue, and the
+    // All five requests went out, in that order: the account, the queue, the
     // ticket's transitions read and then posted — the same collection both ways,
-    // addressed by the key the search answered.
+    // addressed by the key the search answered — and the halt's comment on that
+    // key, which is the last thing a halt does and the only one of the five that
+    // is not part of taking the ticket.
     assert_eq!(jira.opened_with(), [NOT_A_KEY]);
     assert_eq!(
         jira.spelled(),
@@ -526,7 +533,19 @@ fn a_pull_over_a_jira_scope_moves_its_ticket_by_transition_and_stops_at_the_firs
                 Method::POST,
                 format!("/rest/api/3/issue/{JIRA_TICKET}/transitions")
             ),
+            (
+                Method::POST,
+                format!("/rest/api/3/issue/{JIRA_TICKET}/comment")
+            ),
         ]
+    );
+    // And it went up as a document rather than as the Markdown the halt was
+    // written in, naming the stop the split answered with.
+    let (_, _, note) = jira.made().remove(4);
+    assert_eq!(note["body"]["type"], "doc");
+    assert!(
+        format!("{note}").contains("usage limit"),
+        "the comment does not say what stopped the run: {note}"
     );
     // And the ticket the search answered is the one the run took: the tree was
     // read, then the base checked out and caught up, then a branch cut carrying

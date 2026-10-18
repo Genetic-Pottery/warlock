@@ -355,13 +355,7 @@ fn field_errors_are_named_after_the_messages() {
 /// verb a slice teaches moves out of here and into [`every_verb`]; nothing but a
 /// reader checks either.
 fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
-    vec![
-        ("ticket_brief", board.ticket_brief("PAY-1").err()),
-        (
-            "comment_on_ticket",
-            board.comment_on_ticket("PAY-1", "a note").err(),
-        ),
-    ]
+    vec![("ticket_brief", board.ticket_brief("PAY-1").err())]
 }
 
 /// Every verb, the ones a slice has taught after the ones it has not: what a
@@ -389,6 +383,10 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     verbs.push((
         "comment_on_brief",
         board.comment_on_brief(BRIEF, A_CUT).err(),
+    ));
+    verbs.push((
+        "comment_on_ticket",
+        board.comment_on_ticket(TICKET, A_HALT).err(),
     ));
     verbs.push(("move_brief", board.move_brief(BRIEF, IN_PROGRESS).err()));
     verbs.push(("move_ticket", board.move_ticket(TICKET, IN_PROGRESS).err()));
@@ -3931,6 +3929,72 @@ fn a_status_read_that_fails_after_no_move_was_found_leaves_the_status_unnamed() 
         [offered(TICKET), status_of(TICKET)],
         "{:?}",
         board.calls.made()
+    );
+}
+
+/// The account of a stop a pull says on the ticket it ran, shortened but shaped
+/// as `pulling.rs` writes one: prose, a heading and a list, which is Markdown
+/// and is why the conversion stands between it and the wire.
+const A_HALT: &str = "This pull halted, so the ticket stays in progress.\n\n\
+     ### Finished\n\n- `WAR-193.01` Teach the ticket comment\n";
+
+#[test]
+fn a_halt_is_one_comment_on_the_ticket_carrying_the_body_as_adf() {
+    let board = Jira::new(
+        Calling::answering([Ok(
+            json!({ "id": "10200", "self": "https://example.atlassian.net/rest/api/3/issue/10031/comment/10200" }),
+        )]),
+        a_scope(),
+    );
+
+    let id = board
+        .comment_on_ticket(TICKET, A_HALT)
+        .expect("the stand-in answered");
+
+    // Jira's own id for the comment, which no caller reads.
+    assert_eq!(id, "10200");
+    // One POST to the ticket's own comment collection, the body as the document
+    // the conversion made of it. A second call would panic the stand-in, which
+    // is how "one request" is asserted.
+    assert_eq!(
+        board.calls.made(),
+        [said(TICKET, A_HALT)],
+        "{:?}",
+        board.calls.made()
+    );
+
+    let (_, path, sent) = board.calls.made().remove(0);
+
+    assert_eq!(path, format!("/rest/api/3/issue/{TICKET}/comment"));
+    // And a document rather than the Markdown it was written as: the newer API
+    // takes no string there, so a body that went up as text would be a halt
+    // nobody is told about.
+    assert_eq!(sent["body"]["type"], "doc");
+    assert_ne!(sent["body"], json!(A_HALT));
+}
+
+#[test]
+fn a_ticket_comment_jira_turns_down_is_reported_in_jiras_words_and_is_not_retried() {
+    let refused = "You do not have permission to comment on this issue.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: refused.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board
+        .comment_on_ticket(TICKET, A_HALT)
+        .expect_err("the comment was refused");
+
+    assert!(error.to_string().contains(refused), "{error}");
+    // One request and nothing after it: the run's record is already on disk, and
+    // a retried comment is how one halt gets explained twice on one ticket.
+    assert_eq!(
+        board.calls.made(),
+        [said(TICKET, A_HALT)],
+        "the comment was said twice"
     );
 }
 
