@@ -8,7 +8,7 @@ use super::{Cut, Filing, Slice, cut, cut_note, fold_title, noted, quoted, skip};
 use crate::board::{Board, FiledTicket};
 use crate::error::Error;
 use crate::error::status_for;
-use crate::stubs::{Boarding, Op, TicketAsked, VIEWER};
+use crate::stubs::{Boarding, Call, Op, TicketAsked, VIEWER};
 
 const SCOPE: &str = "warlock-team";
 
@@ -283,6 +283,27 @@ fn the_assignee_the_filing_carries_reaches_every_create_and_is_not_asked_for_her
         !linear.ops().contains(&Op::Viewer),
         "a cut asked the board who its issues are for: {:?}",
         linear.ops()
+    );
+}
+
+#[test]
+fn the_pre_flight_is_told_the_brief_the_slices_tickets_file_under() {
+    let repo = a_repository();
+    let linear = a_whole_cut();
+
+    cut_into(repo.path(), &linear, TITLE, &two_drafts())
+        .0
+        .expect("a slice that files");
+
+    // By the address the board itself gave the brief, which is the one this flow
+    // holds and the one every create is handed: a board whose tickets hang off
+    // the brief has to reach it before it can file any, and that is the whole of
+    // what the question carries.
+    assert_eq!(
+        linear.calls().first(),
+        Some(&Call::TicketFiling(PROJECT_ID.to_owned())),
+        "{:?}",
+        linear.calls()
     );
 }
 

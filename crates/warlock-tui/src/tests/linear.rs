@@ -2350,10 +2350,10 @@ fn an_issue_create_that_answers_nothing_usable_is_malformed() {
 #[test]
 fn the_board_settles_a_cuts_filing_from_its_record_and_hands_it_to_the_create() {
     // Through the board rather than the functions under it: the pre-flight is
-    // told nothing at all, so the team key the first read asks about can only
-    // have come off the record it was opened for — and the `teamId` and
-    // `stateId` the mutation writes can only have come back through the value
-    // the caller carried from one verb to the other.
+    // told the brief and nothing else, so the team key the first read asks
+    // about can only have come off the record it was opened for — and the
+    // `teamId` and `stateId` the mutation writes can only have come back
+    // through the value the caller carried from one verb to the other.
     let board = Linear::new(
         Posting::answering([
             Ok(the_team()),
@@ -2364,7 +2364,10 @@ fn the_board_settles_a_cuts_filing_from_its_record_and_hands_it_to_the_create() 
         a_scope(),
     );
 
-    let Filable::Ready(filing) = board.ticket_filing().expect("the stand-in answered") else {
+    let Filable::Ready(filing) = board
+        .ticket_filing("project-1")
+        .expect("the stand-in answered")
+    else {
         panic!("a workspace with the team and the state can be filed into");
     };
     board
@@ -2373,17 +2376,24 @@ fn the_board_settles_a_cuts_filing_from_its_record_and_hands_it_to_the_create() 
 
     let variables = board.posts.variables();
 
+    // Neither of the pre-flight's reads asks about the brief: an issue carries
+    // its project as a field of its own, so where a cut files says nothing
+    // about the team or the state a fresh issue lands in.
     assert_eq!(variables[0], json!({ "key": TEAM }));
     assert_eq!(variables[1], json!({ "team": "team-1" }));
     assert_eq!(variables[3]["input"]["teamId"], json!("team-1"));
     assert_eq!(variables[3]["input"]["stateId"], json!("state-backlog"));
+    // And the project reaches the create from the draft it was named with.
+    assert_eq!(variables[3]["input"]["projectId"], json!("project-1"));
 }
 
 #[test]
 fn a_workspace_with_no_team_for_the_record_has_no_destination_and_is_asked_nothing_more() {
     let board = Linear::new(Posting::answering([Ok(no_team())]), a_scope());
 
-    let filing = board.ticket_filing().expect("an unknown key is an answer");
+    let filing = board
+        .ticket_filing("project-1")
+        .expect("an unknown key is an answer");
 
     // The caller turns this into its own refusal, naming the file the key is
     // written in: the words about a manifest are not this module's.
@@ -2411,7 +2421,9 @@ fn a_team_with_no_backlog_state_has_no_column_and_nothing_is_created() {
         a_scope(),
     );
 
-    let filing = board.ticket_filing().expect("no `Backlog` is an answer");
+    let filing = board
+        .ticket_filing("project-1")
+        .expect("no `Backlog` is an answer");
 
     // Told apart from a team that is not there at all, because the caller says
     // a different sentence about each — and neither sends a mutation.

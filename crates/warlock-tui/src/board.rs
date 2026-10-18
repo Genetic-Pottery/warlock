@@ -112,6 +112,12 @@ pub(crate) trait Board {
     /// Whatever this board must settle before a cut files anything, asked once
     /// for the cut and answered before its first ticket exists.
     ///
+    /// The brief its tickets file under is the one thing the verb is told, by
+    /// the address that board answers one with: a board whose tickets hang off
+    /// the brief has to be able to reach it, and a brief nothing is there for is
+    /// a cut that cannot file. A board whose tickets carry the brief as a field
+    /// of their own reads nothing of it.
+    ///
     /// The one verb here whose answer is a value and not a fact: a board
     /// resolves what its own create wants — a team and a column on a board that
     /// writes those as ids, nothing at all on one that does not — and the
@@ -128,7 +134,7 @@ pub(crate) trait Board {
     /// Nothing is created on the way to either answer, and that ordering is the
     /// promise: a destination a cut cannot file into is refused while the slice
     /// is still nothing rather than half filed.
-    fn ticket_filing(&self) -> Result<Filable<Self::Filing>, Error>;
+    fn ticket_filing(&self, brief: &str) -> Result<Filable<Self::Filing>, Error>;
     fn create_ticket(
         &self,
         issue: &NewTicket<'_>,
@@ -216,9 +222,9 @@ impl Board for Boards {
     /// no vendor in it to name.
     const NAME: &'static str = "the board";
 
-    /// Linear's, which is every filing there is: the Jira board settles `()`
-    /// and refuses the verb that would answer one.
-    type Filing = Resolved;
+    /// Its own, over the two boards' own: each of them settles a different
+    /// thing, and neither can be made from the other.
+    type Filing = Filings;
 
     fn vendor(&self) -> &'static str {
         match self {
@@ -297,34 +303,37 @@ impl Board for Boards {
         }
     }
 
-    fn ticket_filing(&self) -> Result<Filable<Resolved>, Error> {
+    /// Whichever board this is, and its own answer about the destination
+    /// carried through in [`Filings`]: a board that can file says so here, so a
+    /// Jira project with a status for a fresh ticket and an Epic to hang them
+    /// off arrives at the cut as a destination that is there rather than as one
+    /// that is not.
+    ///
+    /// Nothing is read of what either board settled, as nothing anywhere above
+    /// this seam reads one: the variant it is wrapped in is the whole of what
+    /// this enum knows about it, and that is only so the create below can hand
+    /// it back to the board that made it.
+    fn ticket_filing(&self, brief: &str) -> Result<Filable<Filings>, Error> {
         match self {
-            Self::Linear(board) => board.ticket_filing(),
-            // The Jira arm's `Ready` is out of reach: that board refuses this
-            // verb, and were it to answer, its `()` is nothing a [`Resolved`]
-            // can be made from. Folded into the absence rather than left to a
-            // panic — and the slice that teaches Jira to settle a filing has to
-            // give this enum a filing of its own, because a destination that is
-            // there and arrives here as one that is not would stop a cut with
-            // words about the manifest.
-            Self::Jira(board) => Ok(match board.ticket_filing()? {
-                Filable::Ready(()) | Filable::NoDestination => Filable::NoDestination,
-                Filable::NoColumn => Filable::NoColumn,
-            }),
+            Self::Linear(board) => Ok(board.ticket_filing(brief)?.mapped(Filings::Linear)),
+            Self::Jira(board) => Ok(board.ticket_filing(brief)?.mapped(Filings::Jira)),
         }
     }
 
-    fn create_ticket(
-        &self,
-        issue: &NewTicket<'_>,
-        filing: &Resolved,
-    ) -> Result<FiledTicket, Error> {
-        match self {
-            Self::Linear(board) => board.create_ticket(issue, filing),
-            // The filing is unread on the way through, as it is everywhere else
-            // on this seam: this board settles nothing, so there is nothing of
-            // Linear's for it to be handed.
-            Self::Jira(board) => board.create_ticket(issue, &()),
+    fn create_ticket(&self, issue: &NewTicket<'_>, filing: &Filings) -> Result<FiledTicket, Error> {
+        match (self, filing) {
+            (Self::Linear(board), Filings::Linear(filing)) => board.create_ticket(issue, filing),
+            (Self::Jira(board), Filings::Jira(filing)) => board.create_ticket(issue, filing),
+            // Out of reach: a [`Filings`] is built in `ticket_filing` above, on
+            // the same value of this enum the create is then asked of, and
+            // nothing outside this module can make one — so the board that
+            // settled a filing is the board handed it back. A refusal rather
+            // than a panic, because a cut that reaches a create has a slice half
+            // on the board behind it, and a sentence is something a person can
+            // act on where a panic in the middle of one is not.
+            (board, _) => Err(Error::Crossed {
+                board: board.vendor(),
+            }),
         }
     }
 
@@ -931,6 +940,36 @@ pub(crate) enum Filable<F> {
     NoColumn,
 }
 
+impl<F> Filable<F> {
+    /// The same answer about the destination, with whatever the board settled
+    /// put into another shape.
+    ///
+    /// The one thing [`Boards`] does with a filing: say which board's it is
+    /// without reading it. Private to this module, because it is the only place
+    /// a filing changes shape at all — everywhere else on this seam one is
+    /// carried from the verb that answered it to the create that takes it back.
+    fn mapped<G>(self, into: impl FnOnce(F) -> G) -> Filable<G> {
+        match self {
+            Self::Ready(filing) => Filable::Ready(into(filing)),
+            Self::NoDestination => Filable::NoDestination,
+            Self::NoColumn => Filable::NoColumn,
+        }
+    }
+}
+
+/// The [`Filing`](Board::Filing) [`Boards`] settles: whichever board it opened,
+/// holding that board's own.
+///
+/// An enum for the same reason [`Boards`] is one, and it holds types whose
+/// fields are private to the modules that built them — so nothing here can read
+/// either half. This is a value on its way back to the board that made it, and
+/// this enum is the one thing in the middle that has to name both.
+#[derive(Debug)]
+pub(crate) enum Filings {
+    Linear(Resolved),
+    Jira(jira::Settled),
+}
+
 /// What [`Board::create_ticket`] is asked for, and the whole of it: priority,
 /// estimate, cycle and milestone stay unwritten. A draft says what the work is,
 /// and a field warlock would have to invent a value for is a decision taken
@@ -1142,6 +1181,19 @@ pub enum Error {
         board: &'static str,
         verb: &'static str,
     },
+    /// Nothing was sent, because the value a cut settled for its filing is the
+    /// other board's: a create can only be spelled by the board that resolved
+    /// what goes in it.
+    ///
+    /// Out of reach through [`Boards`], which settles a filing on the same
+    /// value it is then asked to create against and is the only thing that can
+    /// build a [`Filings`] at all. It is a refusal here and not a panic because
+    /// a cut that reaches a create has already filed part of a slice, and a
+    /// sentence is something a person can act on. Warlock's own words, as
+    /// [`Stopped`](Self::Stopped) and [`Elsewhere`](Self::Elsewhere) are.
+    Crossed {
+        board: &'static str,
+    },
     /// Type-erased rather than the HTTP client's own error, which is what keeps
     /// this module free of one: a board that speaks over a socket boxes whatever
     /// its transport failed with, and a second board's transport need not be the
@@ -1202,6 +1254,10 @@ impl fmt::Display for Error {
                     "warlock cannot {verb} on a {board} scope yet, so nothing was sent"
                 )
             }
+            Self::Crossed { board } => write!(
+                f,
+                "the filing this cut settled is not {board}'s, so nothing was sent"
+            ),
             Self::Transport { board, source } => write!(f, "could not reach {board}: {source}"),
             Self::Status { board, code } => write!(f, "{board} answered {code}"),
             Self::Malformed { board, detail } => {
@@ -1231,6 +1287,7 @@ impl std::error::Error for Error {
             | Self::Stopped { .. }
             | Self::Elsewhere { .. }
             | Self::Untaught { .. }
+            | Self::Crossed { .. }
             | Self::Status { .. }
             | Self::Malformed { .. }
             | Self::Refused { .. }

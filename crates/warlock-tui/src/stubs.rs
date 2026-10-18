@@ -550,7 +550,7 @@ pub(crate) enum Call {
     MoveBrief { project: String, status: String },
     TicketBrief(String),
     MoveTicket { issue: String, status: String },
-    TicketFiling,
+    TicketFiling(String),
     FetchBrief(String),
     PlannedBriefs,
     BriefNamed(String),
@@ -570,7 +570,7 @@ impl Call {
             Self::MoveBrief { .. } => Op::MoveBrief,
             Self::TicketBrief(_) => Op::TicketBrief,
             Self::MoveTicket { .. } => Op::MoveTicket,
-            Self::TicketFiling => Op::TicketFiling,
+            Self::TicketFiling(_) => Op::TicketFiling,
             Self::FetchBrief(_) => Op::FetchBrief,
             Self::PlannedBriefs => Op::PlannedBriefs,
             Self::BriefNamed(_) => Op::BriefNamed,
@@ -1075,8 +1075,12 @@ impl Board for Boarding {
     /// A board holding no team has no destination, and one holding no state has
     /// no column — the two in that order, so a stand-in built both ways answers
     /// as a board that cannot find its team before it looks for a column in it.
-    fn ticket_filing(&self) -> Result<Filable<Resolved>, BoardError> {
-        self.ask(Call::TicketFiling)?;
+    ///
+    /// The brief is the whole of the recorded call, because it is the whole of
+    /// what the verb is told: the team and the column this answers are the
+    /// record's, as every other destination on this seam is.
+    fn ticket_filing(&self, brief: &str) -> Result<Filable<Resolved>, BoardError> {
+        self.ask(Call::TicketFiling(brief.to_owned()))?;
 
         let Some(team) = self.team.clone() else {
             return Ok(Filable::NoDestination);

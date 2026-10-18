@@ -6,12 +6,12 @@ use ureq::http::Method;
 use warlock_engine::ScopeRecord;
 
 use super::{
-    Calls, Client, EMAIL_TOKEN, JIRA, Jira, REQUEST_TIMEOUT, answer, authorization, base64, pair,
-    refusal, standing, url,
+    Calls, Client, EMAIL_TOKEN, JIRA, Jira, REQUEST_TIMEOUT, Settled, answer, authorization,
+    base64, pair, refusal, standing, url,
 };
 
 use crate::adf::document_for;
-use crate::board::{Board, Error, NewBrief, NewTicket};
+use crate::board::{Board, Error, Filable, NewBrief, NewTicket};
 use crate::brief::{Slice, scope_block_in};
 use crate::cut;
 use crate::stubs::Calling;
@@ -358,13 +358,12 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
         ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
-        ("ticket_filing", board.ticket_filing().err()),
         (
             "create_ticket",
             board
                 .create_ticket(
-                    &NewTicket::new("A slice", "## Goal", "10001", "area/pay", "me"),
-                    &(),
+                    &NewTicket::new("A slice", "## Goal", BRIEF, "area/pay", "me"),
+                    &a_filing(),
                 )
                 .err(),
         ),
@@ -394,6 +393,7 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     verbs.push(("planned_briefs", board.planned_briefs().err()));
     verbs.push(("brief_named", board.brief_named(NAME).err()));
     verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
+    verbs.push(("ticket_filing", board.ticket_filing(BRIEF).err()));
     verbs
 }
 
@@ -1562,6 +1562,346 @@ fn no_read_of_a_brief_goes_under_the_older_api() {
         assert!(path.starts_with("/rest/api/3/"), "{path}");
         assert!(!path.contains("/rest/api/2"), "{path}");
         assert_eq!(method, Method::GET, "{path}");
+        assert_eq!(body, Value::Null, "{path}");
+    }
+}
+
+/// One project's statuses as the read answers them: a group per issue type,
+/// each carrying the statuses that type's workflow holds, and each status's
+/// category key beside its name.
+fn project_statuses(types: &[(&str, &[(&str, &str)])]) -> Value {
+    types
+        .iter()
+        .map(|(issue_type, statuses)| {
+            let statuses: Vec<Value> = statuses
+                .iter()
+                .map(|(name, category)| {
+                    json!({
+                        "id": "10002",
+                        "name": name,
+                        "statusCategory": { "id": 2, "key": category, "name": name },
+                    })
+                })
+                .collect();
+
+            json!({
+                "id": "10001",
+                "name": issue_type,
+                "subtask": false,
+                "statuses": statuses,
+            })
+        })
+        .collect()
+}
+
+/// A project a cut can file into: the three statuses a default workflow holds,
+/// one of them in the category a ticket nobody has started belongs in.
+fn a_filable_project() -> Value {
+    project_statuses(&[(
+        "Task",
+        &[
+            (TO_DO, "new"),
+            ("In Progress", "indeterminate"),
+            ("Done", "done"),
+        ],
+    )])
+}
+
+/// The project read the pre-flight makes, as the stand-in records it. Spelled
+/// out rather than built from the module's own constants, for the reason
+/// [`asked`] spells its own: the path moving, a body appearing or a POST where a
+/// GET was is a failure here and not two expressions that moved together.
+fn statuses_of(project_key: &str) -> (Method, String, Value) {
+    (
+        Method::GET,
+        format!("/rest/api/3/project/{project_key}/statuses"),
+        Value::Null,
+    )
+}
+
+/// The Epic read the pre-flight makes, by the key it was handed: one field
+/// asked for, because an issue read with no `fields` carries every custom field
+/// the site has and nothing of this one is read but the key beside it.
+fn reached(key: &str) -> (Method, String, Value) {
+    (
+        Method::GET,
+        format!("/rest/api/3/issue/{key}?fields=summary"),
+        Value::Null,
+    )
+}
+
+/// The Epic as the pre-flight's own read answers it, which is the whole of what
+/// that read asks for.
+fn reachable() -> Value {
+    json!({ "id": "10042", "key": BRIEF, "fields": { "summary": NAME } })
+}
+
+/// What the pre-flight settles, as the create of every draft in the slice is
+/// handed it back: the Epic by the key Jira spells it with, and the project's
+/// status for a ticket nobody has started.
+fn a_filing() -> Settled {
+    Settled {
+        epic: BRIEF.to_owned(),
+        status: TO_DO.to_owned(),
+    }
+}
+
+#[test]
+fn the_pre_flight_settles_the_epic_and_the_projects_status_for_a_fresh_ticket() {
+    let board = Jira::new(
+        Calling::answering([Ok(a_filable_project()), Ok(reachable())]),
+        a_scope(),
+    );
+
+    let Filable::Ready(settled) = board.ticket_filing(BRIEF).expect("the stand-in answered") else {
+        panic!("a project with a status to begin in and an Epic that is there can be filed into");
+    };
+
+    // The one `new`-category status of the three, by the board's own name for
+    // it: Jira takes a created issue's status from the workflow and not from a
+    // create body, so there is no id to settle and the name is what a
+    // transition's `to` carries.
+    assert_eq!(settled.status, TO_DO);
+    // And the Epic the children will hang off, by the key the site spells.
+    assert_eq!(settled.epic, BRIEF);
+    // Two reads and no mutation, the project before the Epic: the project key
+    // is the record's, so a project that cannot be filed into is the manifest's
+    // to fix and the Epic is never asked about.
+    assert_eq!(
+        board.calls.made(),
+        [statuses_of(PROJECT), reached(BRIEF)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn the_key_jira_spells_back_is_the_one_the_pre_flight_settles() {
+    let typed = "pay-14";
+    let board = Jira::new(
+        Calling::answering([Ok(a_filable_project()), Ok(reachable())]),
+        a_scope(),
+    );
+
+    let Filable::Ready(settled) = board.ticket_filing(typed).expect("the stand-in answered") else {
+        panic!("Jira reads a key case-insensitively");
+    };
+
+    // The create writes the parent by the key, so the key it writes is the one
+    // the site confirmed rather than the one a person typed.
+    assert_eq!(settled.epic, BRIEF);
+    assert_eq!(board.calls.made(), [statuses_of(PROJECT), reached(typed)]);
+}
+
+#[test]
+fn a_status_under_any_of_the_projects_issue_types_is_one_a_fresh_ticket_can_land_in() {
+    // What is being asked is whether this project can take a fresh ticket at
+    // all: a child's issue type is the project's own default, so every group
+    // the read answers is read.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(project_statuses(&[
+                ("Epic", &[("In Progress", "indeterminate")]),
+                ("Task", &[(TO_DO, "new")]),
+            ])),
+            Ok(reachable()),
+        ]),
+        a_scope(),
+    );
+
+    let Filable::Ready(settled) = board.ticket_filing(BRIEF).expect("the stand-in answered") else {
+        panic!("a project with a status to begin in can be filed into");
+    };
+
+    assert_eq!(settled.status, TO_DO);
+}
+
+#[test]
+fn a_project_answering_a_flat_list_of_statuses_is_read_the_same_way() {
+    // The documented answer groups the statuses by issue type, and this is the
+    // one read in the module nobody has put a curl against: a site handing back
+    // the statuses themselves is read as the same project, because of the two
+    // ways to be wrong about the shape, refusing a project that can file is the
+    // one that stops a cut.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(json!([
+                { "name": "Done", "statusCategory": { "key": "done" } },
+                { "name": TO_DO, "statusCategory": { "key": "new" } },
+            ])),
+            Ok(reachable()),
+        ]),
+        a_scope(),
+    );
+
+    let Filable::Ready(settled) = board.ticket_filing(BRIEF).expect("the stand-in answered") else {
+        panic!("a project with a status to begin in can be filed into");
+    };
+
+    assert_eq!(settled.status, TO_DO);
+}
+
+#[test]
+fn a_project_the_site_does_not_hold_has_no_destination_and_the_epic_is_never_read() {
+    for message in [
+        Some("No project could be found with key 'PAY'.".to_owned()),
+        None,
+    ] {
+        let said = format!("{message:?}");
+        let board = Jira::new(
+            Calling::answering([Err(Error::Absent {
+                board: JIRA,
+                message,
+            })]),
+            a_scope(),
+        );
+
+        let filing = board
+            .ticket_filing(BRIEF)
+            .expect("a project that is not there is an answer");
+
+        // The caller turns this into its own refusal, naming the file the
+        // project key is written in: the words about a manifest are not this
+        // module's. Nothing is asked about the Epic and no mutation is sent.
+        assert!(
+            matches!(filing, Filable::NoDestination),
+            "{said}: {filing:?}"
+        );
+        assert_eq!(board.calls.made(), [statuses_of(PROJECT)], "{said}");
+    }
+}
+
+#[test]
+fn a_project_with_no_status_for_a_fresh_ticket_has_no_column_and_the_epic_is_never_read() {
+    for statuses in [
+        // A project whose workflow has nothing left to begin in.
+        project_statuses(&[(
+            "Task",
+            &[("In Progress", "indeterminate"), ("Done", "done")],
+        )]),
+        // A category key nothing has seen, which `Category::of` reads as
+        // started: the corner where a project is left alone rather than filed
+        // into on a guess.
+        project_statuses(&[("Task", &[("Held", "invented")])]),
+        // A status with no category at all, and a project with no issue types.
+        json!([{ "statuses": [{ "name": "Held" }] }]),
+        json!([]),
+    ] {
+        let board = Jira::new(Calling::answering([Ok(statuses.clone())]), a_scope());
+
+        let filing = board
+            .ticket_filing(BRIEF)
+            .expect("a project with no such status is an answer");
+
+        // Told apart from a project that is not there at all, because the caller
+        // says a different sentence about each — and neither reads the Epic or
+        // sends a mutation.
+        assert!(
+            matches!(filing, Filable::NoColumn),
+            "{statuses}: {filing:?}"
+        );
+        assert_eq!(board.calls.made(), [statuses_of(PROJECT)], "{statuses}");
+    }
+}
+
+#[test]
+fn an_epic_the_site_does_not_hold_is_the_absence_the_caller_propagates() {
+    // Not one of the two destination answers: the project key is the record's
+    // and the Epic's key is the one a person typed, so a key nothing is there
+    // for is the 404 every read here answers with and the caller carries it.
+    let said = "Issue does not exist or you do not have permission to see it.";
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_filable_project()),
+            Err(Error::Absent {
+                board: JIRA,
+                message: Some(said.to_owned()),
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let error = board
+        .ticket_filing("PAY-999")
+        .expect_err("the Epic is not there");
+
+    assert!(
+        matches!(error, Error::Absent { board: JIRA, .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains(said), "{error}");
+    assert_eq!(
+        board.calls.made(),
+        [statuses_of(PROJECT), reached("PAY-999")]
+    );
+}
+
+#[test]
+fn a_project_read_jira_refuses_is_reported_in_jiras_words_and_the_epic_is_never_read() {
+    let said = "You do not have permission to view this project.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board
+        .ticket_filing(BRIEF)
+        .expect_err("the project read was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    // One request per read and no retry, as every call on this transport is.
+    assert_eq!(
+        board.calls.made(),
+        [statuses_of(PROJECT)],
+        "the read was retried"
+    );
+}
+
+#[test]
+fn a_statuses_answer_that_is_not_a_list_or_an_epic_with_no_key_is_malformed() {
+    for answers in [
+        vec![Ok(json!({ "values": [] }))],
+        vec![Ok(Value::Null)],
+        // The Epic's own read: a request the site answered at all answered
+        // about an issue, so an answer with no key is bytes a proxy sent.
+        vec![
+            Ok(a_filable_project()),
+            Ok(json!({ "fields": { "summary": NAME } })),
+        ],
+    ] {
+        let board = Jira::new(Calling::answering(answers), a_scope());
+
+        let error = board
+            .ticket_filing(BRIEF)
+            .expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn the_pre_flight_sends_no_mutation_and_reads_only_under_the_newer_api() {
+    let board = Jira::new(
+        Calling::answering([Ok(a_filable_project()), Ok(reachable())]),
+        a_scope(),
+    );
+
+    let filing = board.ticket_filing(BRIEF).expect("the stand-in answered");
+
+    assert!(matches!(filing, Filable::Ready(_)), "{filing:?}");
+    for (method, path, body) in board.calls.made() {
+        // The whole promise of this verb: a destination a cut cannot file into
+        // is refused while the slice is still nothing, so every call it makes
+        // is a read.
+        assert_eq!(method, Method::GET, "{path}");
+        assert!(path.starts_with("/rest/api/3/"), "{path}");
+        assert!(!path.contains("/rest/api/2"), "{path}");
         assert_eq!(body, Value::Null, "{path}");
     }
 }

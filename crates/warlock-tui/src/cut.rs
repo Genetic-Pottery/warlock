@@ -29,7 +29,8 @@ use crate::error::{Error, say};
 use crate::queue::IN_PROGRESS;
 
 /// Where one slice's issues go: the board [`resolve_filing`] answered and the
-/// project the draft was named with, by Linear's own id.
+/// brief the draft was named with, by the address that board gives one — a
+/// Linear project's own id, a Jira Epic's key.
 ///
 /// `assignee` is the user the key belongs to, resolved once for the run by
 /// [`prepare`] rather than here: this is one slice of several, and the answer is
@@ -91,10 +92,15 @@ pub(crate) fn cut<W: Write>(
     // the column. Whatever the board settled comes back opaque and is carried
     // to each create unread — nothing here is holding one board's ids.
     //
+    // The brief is the whole of what the question carries, by the address the
+    // board gave it: a board whose tickets hang off the brief has to reach it
+    // before it can file any, and a board whose tickets carry it as a field
+    // reads nothing of it.
+    //
     // Asked first and not once a draft has been filed: a refusal while the
     // slice is still nothing costs nothing, and the same question after the
     // first create would leave a slice half filed on the board.
-    let settled = match linear.ticket_filing()? {
+    let settled = match linear.ticket_filing(filing.project)? {
         Filable::Ready(settled) => settled,
         Filable::NoDestination => {
             return Err(Error::UnknownTeam {
