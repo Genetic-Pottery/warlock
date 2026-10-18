@@ -58,7 +58,7 @@ use warlock_engine::{BoardScope, Manifest, PullRun, load_key_binding};
 
 use crate::app::App;
 use crate::board::{
-    Board, Error as BoardError, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing,
+    Board, Error as BoardError, FetchedBrief, Filable, FiledBrief, FiledTicket, Listing, Moved,
     NamedTicket, NewBrief, NewTicket, Opener as LinearOpener, Opens, Queue, TicketBrief,
 };
 use crate::claude::{
@@ -1015,7 +1015,7 @@ impl<B: Board> Board for Quiet<B> {
         self.asked(|board| board.ticket_brief(issue))
     }
 
-    fn move_ticket(&self, issue: &str, status: &str) -> Result<bool, BoardError> {
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<Moved, BoardError> {
         self.asked(|board| board.move_ticket(issue, status))
     }
 

@@ -22,8 +22,8 @@ use warlock_engine::{FiledTo, ScopeRecord};
 use crate::adf::{body_for, document_for};
 use crate::board::{
     Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket,
-    Holder, Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket, SKIP_NOTE,
-    TicketBrief,
+    Holder, Listing, Moved, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket,
+    SKIP_NOTE, TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
 use crate::queue::same_name;
@@ -137,9 +137,11 @@ const QUEUED_FIELDS: &[&str] = &["summary", "status", "description", "priority",
 /// custom fields does not come back whole to be thrown away.
 const PARENT_FIELDS: &str = "summary";
 
-/// The field a freshly filed child is read back for, and the whole of it: where
-/// the workflow's initial transition put the issue, which a create's own answer
-/// says nothing about.
+/// The field an issue is read back for when where it stands is the question, and
+/// the whole of it: where the workflow's initial transition put a child a create
+/// has just filed, which a create's own answer says nothing about, and where a
+/// ticket stayed when no transition reached the status that was asked for, which
+/// a transitions answer says nothing about either.
 const STATUS_FIELDS: &str = "status";
 
 /// How a Jira key is typed, and the whole of what a refusal of a stored line
@@ -278,16 +280,17 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but eleven refuses as this stands: the two a push makes, the
+/// Every verb but twelve refuses as this stands: the two a push makes, the
 /// brief-by-name lookup and the brief create; the two a cut reads first, for
 /// whose key it is and for the brief itself; the pre-flight a cut settles
 /// before it files anything and the create that files each of a slice's drafts;
 /// the edge between two of those tickets, the note that records the slice and
 /// the brief's own move once every slice is settled; the listing a bare
-/// `warlock draft` prints; and the queue a pull chooses a ticket out of. The
-/// requests themselves arrive a slice at a time, and a board that refuses is
-/// what keeps a flow which reaches a verb nobody has written yet a sentence
-/// rather than a panic.
+/// `warlock draft` prints; and the queue a pull chooses a ticket out of, with
+/// the move that puts the ticket it chose in another column. The requests
+/// themselves arrive a slice at a time, and a board that refuses is what keeps a
+/// flow which reaches a verb nobody has written yet a sentence rather than a
+/// panic.
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
@@ -436,57 +439,107 @@ impl<C: Calls> Jira<C> {
     /// that refuses with an issue standing, the same as a create that failed
     /// partway through a slice.
     fn begun(&self, key: &str, status: &str) -> Result<(), Error> {
-        let child = self.calls.call(
-            Method::GET,
-            &format!("{ISSUE}/{key}?fields={STATUS_FIELDS}"),
-            Value::Null,
-        )?;
-        let fields = child.get("fields").ok_or_else(|| missing("fields"))?;
-
         // The same judgement a fetched brief's own status gets, on the category
         // key and never on the name: `To Do` on one project is `Triage` on the
         // next, and what is being asked is whether this is work nobody has
         // started.
-        if standing(fields.get("status")).1 {
+        if self.stands(key)?.1 {
             return Ok(());
         }
 
         self.shifted(key, status).map(drop)
     }
 
+    /// Where one issue stands, as [`standing`] reads a status: the board's own
+    /// name for it, and whether nobody has started it.
+    ///
+    /// One request, and the narrowest read in this module: an issue read with no
+    /// `fields` carries every field the site has, and the status is the whole of
+    /// what either caller asks about.
+    fn stands(&self, key: &str) -> Result<(Option<String>, bool), Error> {
+        let issue = self.calls.call(
+            Method::GET,
+            &format!("{ISSUE}/{key}?fields={STATUS_FIELDS}"),
+            Value::Null,
+        )?;
+        let fields = issue.get("fields").ok_or_else(|| missing("fields"))?;
+
+        Ok(standing(fields.get("status")))
+    }
+
     /// One issue moved into the status of that name, and whether its workflow
     /// offered a way there at all.
     ///
-    /// The one place this module spends a transition, for the child
-    /// [`begun`](Self::begun) has just filed and for the Epic
+    /// For the child [`begun`](Self::begun) has just filed and for the Epic
     /// [`move_brief`](Board::move_brief) has just settled alike: a read of what
     /// the workflow offers from where the issue stands, then a POST of the one
-    /// whose `to` is called that, by its id.
-    ///
-    /// The choice is [`chosen`]'s, on the name and never on the status
-    /// category: a workflow can hold two statuses in one category, and warlock
-    /// taking whichever one the site listed a transition to first would move the
-    /// issue somewhere nobody asked for.
+    /// whose `to` is called that.
     ///
     /// `false` with nothing posted where the workflow offers no such move, so a
-    /// caller cannot mistake it for a move that happened. One request for the
-    /// mutation and no retry, per this module's rule: a transition Jira turns
-    /// down is the caller's to report in Jira's own words.
+    /// caller cannot mistake it for a move that happened — and nothing more than
+    /// that, which is the difference from the answer
+    /// [`move_ticket`](Board::move_ticket) owes its own caller: neither of these
+    /// two reports a column to anybody, so neither buys the read that would say
+    /// where the issue stayed.
     fn shifted(&self, key: &str, status: &str) -> Result<bool, Error> {
-        let offered = self
-            .calls
-            .call(Method::GET, &transitions(key), Value::Null)?;
-        let Some(transition) = chosen(&offered, status)? else {
+        let offers = self.offers(key)?;
+        let Some(transition) = chosen(&offers, status) else {
             return Ok(false);
         };
 
-        self.calls.call(
-            Method::POST,
-            &transitions(key),
-            json!({ "transition": { "id": transition } }),
-        )?;
-
+        self.spend(key, &transition)?;
         Ok(true)
+    }
+
+    /// Every move the issue offers from where it stands: each transition's id,
+    /// and the board's own name for the status it lands in, in the order the
+    /// site listed them.
+    ///
+    /// One request. A transition carrying no id or no `to` name is dropped
+    /// rather than refused: what a caller does with these is match a name and
+    /// post an id, and a transition missing either is one neither of those can
+    /// be done with.
+    ///
+    /// An answer carrying no `transitions` at all is malformed and not an issue
+    /// with nowhere to go: a workflow always offers something from where an
+    /// issue stands, so an answer with no list in it is bytes a proxy decided to
+    /// send.
+    fn offers(&self, key: &str) -> Result<Vec<(String, String)>, Error> {
+        let answered = self
+            .calls
+            .call(Method::GET, &transitions(key), Value::Null)?;
+        let offered = answered
+            .get("transitions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| missing("transitions"))?;
+
+        Ok(offered
+            .iter()
+            .filter_map(|transition| {
+                let id = transition.get("id")?.as_str()?;
+                let name = transition.get("to")?.get("name")?.as_str()?;
+
+                Some((id.to_owned(), name.to_owned()))
+            })
+            .collect())
+    }
+
+    /// One of those moves spent, by its id.
+    ///
+    /// The one place this module posts a transition, which is the only way an
+    /// issue's status is written at all: Jira takes no status in a create body
+    /// and none in an edit either.
+    ///
+    /// One request and no retry, per this module's rule: a transition Jira turns
+    /// down is the caller's to report in Jira's own words.
+    fn spend(&self, key: &str, transition: &str) -> Result<(), Error> {
+        self.calls
+            .call(
+                Method::POST,
+                &transitions(key),
+                json!({ "transition": { "id": transition } }),
+            )
+            .map(drop)
     }
 
     /// The refusal of a verb no slice has written for this board yet, with
@@ -588,8 +641,46 @@ impl<C: Calls> Board for Jira<C> {
         self.untaught("read the brief a ticket belongs to")
     }
 
-    fn move_ticket(&self, _issue: &str, _status: &str) -> Result<bool, Error> {
-        self.untaught("move a ticket")
+    /// Move the ticket into the status of that name, and when the workflow
+    /// offers no way there, the statuses it does offer and the one the ticket is
+    /// in now.
+    ///
+    /// A transition and nothing else, as [`move_brief`](Self::move_brief) is:
+    /// Jira holds where an issue stands behind the workflow, so the only move
+    /// there is is one the issue itself offers, and the name the caller gave is
+    /// matched against what each transition's `to` is called.
+    ///
+    /// The second read is spent only where the move was not made, and the trade
+    /// is deliberate: a transitions answer says where an issue can go and never
+    /// where it is, so the status the caller names in its line has to be read
+    /// off the issue — the same `fields=status` read a freshly filed child gets.
+    /// Reading the issue with `expand=transitions` instead would answer both in
+    /// one request and was turned down, because it would move the read of what a
+    /// move costs off the collection a move is spent on and buy the status on
+    /// every move that worked. So the move that happens is one read and one
+    /// post, the move that cannot is two reads and nothing posted, and neither
+    /// is retried.
+    ///
+    /// A failure of that second read is a status left unnamed and not an error.
+    /// The move into review comes after the pull request is open, so failing the
+    /// verb here fails a run whose work is already up, over a word the line
+    /// would only have printed.
+    ///
+    /// Never a second attempt at a status of another name: the caller asked for
+    /// one column, and warlock picking a different one would be a ticket moved
+    /// somewhere nobody asked for and a line saying it had not been.
+    fn move_ticket(&self, issue: &str, status: &str) -> Result<Moved, Error> {
+        self.site()?;
+        let offers = self.offers(issue)?;
+        let Some(transition) = chosen(&offers, status) else {
+            return Ok(Moved::Unreached {
+                reachable: offers.into_iter().map(|(_, name)| name).collect(),
+                standing: self.stands(issue).ok().and_then(|(name, _)| name),
+            });
+        };
+
+        self.spend(issue, &transition)?;
+        Ok(Moved::Reached)
     }
 
     /// The Epic this key names — its summary as the brief's name, its status,
@@ -1175,31 +1266,21 @@ fn transitions(key: &str) -> String {
     format!("{ISSUE}/{key}/transitions")
 }
 
-/// The first transition the issue offers into a status of that name, by the id
-/// a POST spends it with, or `None` when it offers none.
+/// The first of [`Jira::offers`]'s moves that lands in a status of that name, by
+/// the id a POST spends it with, or `None` when none of them does.
 ///
-/// The name and not the category, for the reason [`Jira::shifted`] states: a
-/// workflow can hold two statuses in one category, and which of them a caller
-/// meant is a thing only the name says. Compared as [`same_name`] compares —
-/// trimmed and case-folded — because the name on this side was read off a
-/// status and the one on the wire is the board's own word for where a
-/// transition lands.
+/// The name and never the status category: a workflow can hold two statuses in
+/// one category — `In Progress` and `In Review` are both `indeterminate` on a
+/// default board — and warlock taking whichever one the site listed a transition
+/// to first would move the issue somewhere nobody asked for.
 ///
-/// An answer carrying no `transitions` at all is malformed and not an issue with
-/// nowhere to go: a workflow always offers something from where an issue stands,
-/// so an answer with no list in it is bytes a proxy decided to send.
-fn chosen(offered: &Value, status: &str) -> Result<Option<String>, Error> {
-    let offered = offered
-        .get("transitions")
-        .and_then(Value::as_array)
-        .ok_or_else(|| missing("transitions"))?;
-
-    Ok(offered.iter().find_map(|transition| {
-        let name = transition.get("to")?.get("name")?.as_str()?;
-        let id = transition.get("id")?.as_str()?;
-
-        same_name(name, status).then(|| id.to_owned())
-    }))
+/// Compared as [`same_name`] compares — trimmed and case-folded — because the
+/// name on this side was read off a status or off a record and the one on the
+/// wire is the board's own word for where a transition lands.
+fn chosen(offers: &[(String, String)], status: &str) -> Option<String> {
+    offers
+        .iter()
+        .find_map(|(id, name)| same_name(name, status).then(|| id.clone()))
 }
 
 /// One issue's status as a read answers it: the name a refusal prints, and

@@ -1301,6 +1301,58 @@ fn a_team_with_no_review_state_gets_a_line_and_the_run_still_finishes() {
 }
 
 #[test]
+fn a_review_state_no_transition_reaches_is_a_line_naming_where_the_ticket_stands() {
+    let ground = Ground::new();
+    let board = Boarding::filing("").standing_in("In Progress", &["Done", "Won't Do"]);
+    let forge = Forging::opening(URL);
+    let (repo, split, sessions) = two_sub_tasks();
+
+    let (pulled, events) = pull(&ground, &board, &repo, &forge, &split, &sessions);
+
+    let Ok(opened) = pulled else {
+        panic!("a review state out of reach is a line, not a failure: {pulled:?}");
+    };
+    assert_eq!(
+        opened,
+        Pulled::Opened {
+            ticket: TICKET.to_owned(),
+            url: Some(URL.to_owned()),
+        }
+    );
+    assert_eq!(opened.status(), 0);
+
+    let unreached = PullEvent::ReviewNotReached {
+        scope: SCOPE.to_owned(),
+        state: REVIEW.to_owned(),
+        standing: Some("In Progress".to_owned()),
+        reachable: vec!["Done".to_owned(), "Won't Do".to_owned()],
+    };
+    assert!(events.contains(&unreached));
+    assert_eq!(
+        unreached.line().as_deref(),
+        Some(
+            "the scope `warlock-team` records `In Review` as its review state, and the ticket \
+             was not moved into review: it stands in `In Progress`, which reaches `Done`, \
+             `Won't Do`"
+        )
+    );
+    // The same board reaches no `In Progress` either, and that line is the one
+    // it has always been: no state carried, and the team named rather than the
+    // scope.
+    assert!(events.contains(&PullEvent::NoStartState {
+        team: TEAM.to_owned(),
+    }));
+
+    // The pull request was opened, the URL is on the ticket, and the record was
+    // written: the ticket not moving is not the run stopping.
+    assert_eq!(forge.asked().len(), 1);
+    assert_eq!(comments(&board).len(), 1);
+    let saved = ground.saved();
+    assert_eq!(saved.status(), RunStatus::InReview);
+    assert_eq!(saved.pr_url(), Some(URL));
+}
+
+#[test]
 fn no_gh_comments_the_body_on_the_ticket_and_the_run_still_counts_as_finished() {
     let ground = Ground::new();
     let board = Boarding::filing("");
