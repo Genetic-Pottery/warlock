@@ -653,15 +653,33 @@ impl QueuedTicket {
 }
 
 /// An issue holding up one in the queue, in the three facts a refusal needs: the
-/// identifier to name it, the assignee to say whose it is, and the state type to
-/// say whether it is still in the way.
+/// identifier to name it, whose it is, and the state type to say whether it is
+/// still in the way.
 ///
 /// No id and no title: nothing is done to a blocker, it is only reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blocker {
     pub(crate) identifier: String,
-    pub(crate) assignee: Option<String>,
+    pub(crate) holder: Holder,
     pub(crate) state_type: Category,
+}
+
+/// Whose a [`Blocker`] is, as far as the board said.
+///
+/// Three answers and not an `Option`, because "nobody" and "not read" print
+/// differently: Jira carries no assignee on the far side of a link, and calling
+/// that blocker unassigned would tell a person something false about work that
+/// is somebody's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Holder {
+    /// The person's name and not their id: a blocker is never matched against
+    /// anybody, only printed.
+    Named(String),
+    /// Assigned to nobody, which a queue filtered by assignee can still be held
+    /// up by.
+    Nobody,
+    /// The board's answer did not say.
+    Unread,
 }
 
 impl Blocker {
@@ -673,7 +691,7 @@ impl Blocker {
     ) -> Self {
         Self {
             identifier: identifier.into(),
-            assignee: assignee.map(ToOwned::to_owned),
+            holder: assignee.map_or(Holder::Nobody, |name| Holder::Named(name.to_owned())),
             state_type,
         }
     }
@@ -683,12 +701,9 @@ impl Blocker {
         &self.identifier
     }
 
-    /// The person's name and not their id: a blocker is never matched against
-    /// anybody, only printed. `None` is an unassigned blocker, which a queue
-    /// filtered by assignee can still be held up by.
     #[must_use]
-    pub fn assignee(&self) -> Option<&str> {
-        self.assignee.as_deref()
+    pub const fn holder(&self) -> &Holder {
+        &self.holder
     }
 
     #[must_use]

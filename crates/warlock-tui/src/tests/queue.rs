@@ -1,7 +1,7 @@
 use crate::Category;
 
 use super::{
-    Blocker, IN_PROGRESS, Priority, PullRun, Queue, QueuedTicket, Reason, RunStatus,
+    Blocker, Holder, IN_PROGRESS, Priority, PullRun, Queue, QueuedTicket, Reason, RunStatus,
     blocking_counts, choose, number_in, order_of,
 };
 
@@ -122,6 +122,28 @@ fn an_issue_is_ready_when_every_blocker_is_completed_or_canceled() {
 
     assert_eq!(taken(&queue, "In Review", &[]).as_deref(), Some("WAR-10"));
     assert!(reasons(&queue, "In Review", &[]).is_empty());
+}
+
+#[test]
+fn a_blocker_whose_holder_the_board_did_not_say_is_named_by_its_key_alone() {
+    let unread = Blocker {
+        holder: Holder::Unread,
+        ..open("KAN-12", None)
+    };
+    let queue = queue_of(vec![issue(
+        "KAN-13",
+        "To Do",
+        Priority::Medium,
+        vec![unread, open("KAN-14", None)],
+    )]);
+
+    assert_eq!(
+        reasons(&queue, "In Review", &[]),
+        [(
+            "KAN-13".to_owned(),
+            "blocked by KAN-12, KAN-14 (unassigned)".to_owned()
+        )]
+    );
 }
 
 #[test]

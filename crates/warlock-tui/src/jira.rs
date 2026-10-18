@@ -22,7 +22,7 @@ use warlock_engine::{FiledTo, ScopeRecord};
 use crate::adf::{body_for, document_for};
 use crate::board::{
     Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket,
-    Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket, SKIP_NOTE,
+    Holder, Listing, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket, SKIP_NOTE,
     TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
@@ -1335,10 +1335,10 @@ fn blocking(fields: &Value) -> Result<Vec<Blocker>, Error> {
 /// the next. Read rather than defaulted, for [`queued`]'s reason — a category
 /// guessed here is a guess about whether work can start.
 ///
-/// No assignee, because the answer carries none: Jira puts `summary`, `status`,
-/// `priority` and `issuetype` on the far side of a link and nothing else, and
-/// naming the person would cost a read per blocker to print one word. A queue's
-/// refusal calls every Jira blocker unassigned.
+/// [`Holder::Unread`], because the answer carries no assignee: Jira puts
+/// `summary`, `status`, `priority` and `issuetype` on the far side of a link and
+/// nothing else, and naming the person would cost a read per blocker to print
+/// one word. Not [`Holder::Nobody`], which a refusal prints as unassigned.
 fn held_by(blocker: &Value) -> Result<Blocker, Error> {
     let category = blocker
         .get("fields")
@@ -1354,7 +1354,7 @@ fn held_by(blocker: &Value) -> Result<Blocker, Error> {
             .and_then(Value::as_str)
             .ok_or_else(|| missing("issuelinks.inwardIssue.key"))?
             .to_owned(),
-        assignee: None,
+        holder: Holder::Unread,
         state_type: Category::of(category),
     })
 }

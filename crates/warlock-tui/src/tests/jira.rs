@@ -11,7 +11,7 @@ use super::{
 };
 
 use crate::adf::document_for;
-use crate::board::{Board, Category, Error, Filable, NewBrief, NewTicket, Priority};
+use crate::board::{Board, Category, Error, Filable, Holder, NewBrief, NewTicket, Priority};
 use crate::brief::{Slice, scope_block_in};
 use crate::cut;
 use crate::queue::IN_PROGRESS;
@@ -3132,8 +3132,8 @@ fn link(relation: &str, side: &str, far: Value) -> Value {
 
 /// The far side of a link as Jira hands it back on an issue: the key, the id
 /// beside it that nothing reads, and the four fields a link carries its far
-/// side's — no `assignee` among them, which is why every blocker read off this
-/// board is unassigned.
+/// side's — no `assignee` among them, which is why no blocker read off this
+/// board says whose it is.
 fn far_side(key: &str, status: &str, category: &str) -> Value {
     json!({
         "id": "10020",
@@ -3200,10 +3200,10 @@ fn a_blocker_is_read_off_the_very_side_a_link_create_writes_one_into() {
     // The category of the blocker's own status, which is what says whether it
     // is still in the way, and the board's word for it is never read.
     assert_eq!(blocker.state_type(), Category::Started);
-    // Nobody, because the far side of a link carries no `assignee`: a queue's
-    // refusal names every Jira blocker unassigned rather than spending a read
-    // per link to print one word.
-    assert_eq!(blocker.assignee(), None);
+    // Unread rather than nobody, because the far side of a link carries no
+    // `assignee`: a queue's refusal names a Jira blocker by its key alone
+    // rather than spending a read per link to print one word.
+    assert_eq!(blocker.holder(), &Holder::Unread);
     // And the links cost no request of their own: they ride back in the fields
     // the queue's own search asked for.
     assert_eq!(reader.calls.made(), [pulling(None)]);
