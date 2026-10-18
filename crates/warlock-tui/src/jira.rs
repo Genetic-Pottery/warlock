@@ -58,6 +58,18 @@ const MYSELF: &str = "/rest/api/3/myself";
 /// second spelling.
 const EPIC: &str = "Epic";
 
+/// Jira's own name for the issue type a cut's children are filed as, written by
+/// [`Board::create_ticket`] as [`EPIC`] is written by the brief's create.
+///
+/// Named because Jira requires `issuetype` on a create and takes no default
+/// from the project, so there is no way to leave the decision to the site: this
+/// is the type every project template is created with, and the one an Epic is
+/// ordinarily the parent of. A site that has renamed it refuses the create in
+/// its own words, which is the same answer [`EPIC`] gets and for the same
+/// reason — warlock guessing a second spelling would file the slice somewhere
+/// nobody asked for.
+const TASK: &str = "Task";
+
 /// Jira's own key for the status category an Epic is still open for drafting
 /// in, written into the JQL a listing narrows by.
 ///
@@ -88,6 +100,11 @@ const BRIEF_FIELDS: &str = "summary,status,description";
 /// whatever is asked for. Asked for all the same, so an issue with two hundred
 /// custom fields does not come back whole to be thrown away.
 const PARENT_FIELDS: &str = "summary";
+
+/// The field a freshly filed child is read back for, and the whole of it: where
+/// the workflow's initial transition put the issue, which a create's own answer
+/// says nothing about.
+const STATUS_FIELDS: &str = "status";
 
 /// How a Jira key is typed, and the whole of what a refusal of a stored line
 /// says about it.
@@ -225,13 +242,13 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but six refuses as this stands: the two a push makes, the
+/// Every verb but seven refuses as this stands: the two a push makes, the
 /// brief-by-name lookup and the brief create; the two a cut reads first, for
 /// whose key it is and for the brief itself; the pre-flight a cut settles
-/// before it files anything; and the listing a bare `warlock draft` prints. The
-/// requests themselves arrive a slice at a time, and a board that refuses is
-/// what keeps a flow which reaches a verb nobody has written yet a sentence
-/// rather than a panic.
+/// before it files anything and the create that files each of a slice's drafts;
+/// and the listing a bare `warlock draft` prints. The requests themselves
+/// arrive a slice at a time, and a board that refuses is what keeps a flow
+/// which reaches a verb nobody has written yet a sentence rather than a panic.
 #[derive(Debug)]
 pub(crate) struct Jira<C = Client> {
     calls: C,
@@ -357,6 +374,62 @@ impl<C: Calls> Jira<C> {
         }
     }
 
+    /// Put a freshly filed child in a status for work nobody has started, when
+    /// the workflow did not open it in one.
+    ///
+    /// One read and nothing more on an ordinary board, which is the whole cost
+    /// of it: a create answers an `id`, a `key` and a `self` and says nothing
+    /// about status, so where the workflow's initial transition put the child
+    /// has to be read back — and a child already in a [`Category::New`] status,
+    /// which is what every default workflow answers, is left exactly as it
+    /// landed.
+    ///
+    /// A move is a transition and there is nothing else it could be: Jira takes
+    /// no status in a create body and none in an edit either. The transition is
+    /// chosen on the name its `to` carries, which is the name the pre-flight
+    /// read off the project's own statuses, and never on the category — a
+    /// workflow holding two `new` statuses would otherwise put the child in
+    /// whichever one the site happened to list a transition to first.
+    ///
+    /// A workflow offering no transition into that status posts nothing and
+    /// leaves the child where it landed: the issue exists, it is the Epic's
+    /// child and it carries the label, and there is no second way to ask for a
+    /// status this one cannot reach. A call that failed is the caller's to
+    /// report, as every call in this module is — which on this one means a cut
+    /// that refuses with an issue standing, the same as a create that failed
+    /// partway through a slice.
+    fn begun(&self, key: &str, status: &str) -> Result<(), Error> {
+        let child = self.calls.call(
+            Method::GET,
+            &format!("{ISSUE}/{key}?fields={STATUS_FIELDS}"),
+            Value::Null,
+        )?;
+        let fields = child.get("fields").ok_or_else(|| missing("fields"))?;
+
+        // The same judgement a fetched brief's own status gets, on the category
+        // key and never on the name: `To Do` on one project is `Triage` on the
+        // next, and what is being asked is whether this is work nobody has
+        // started.
+        if standing(fields.get("status")).1 {
+            return Ok(());
+        }
+
+        let offered = self
+            .calls
+            .call(Method::GET, &transitions(key), Value::Null)?;
+        let Some(transition) = chosen(&offered, status)? else {
+            return Ok(());
+        };
+
+        self.calls
+            .call(
+                Method::POST,
+                &transitions(key),
+                json!({ "transition": { "id": transition } }),
+            )
+            .map(drop)
+    }
+
     /// The refusal of a verb no slice has written for this board yet, with
     /// nothing sent through [`Calls`].
     ///
@@ -386,12 +459,6 @@ impl<C: Calls> Jira<C> {
 /// create to write: this is the status a child is moved into when it did not
 /// land in a `new` category, and a transition is chosen on the name its `to`
 /// carries.
-// The fields are written here and read by the create, which this board has yet
-// to be taught. Kept rather than dropped to satisfy the lint: the pre-flight is
-// what buys the property that a cut which cannot file is refused before its
-// first ticket, and throwing its two answers away would buy the same two reads
-// again for every draft in the slice.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct Settled {
     epic: String,
@@ -713,12 +780,63 @@ impl<C: Calls> Board for Jira<C> {
         Ok(Filable::Ready(Settled { epic, status }))
     }
 
-    fn create_ticket(
-        &self,
-        _issue: &NewTicket<'_>,
-        _filing: &Settled,
-    ) -> Result<FiledTicket, Error> {
-        self.untaught("file a ticket")
+    /// File one draft as an issue in the record's project, under the Epic the
+    /// pre-flight settled, carrying the label, the assignee and its body as an
+    /// ADF document — then put it in a status for work nobody has started, if
+    /// the workflow did not.
+    ///
+    /// `fields.parent` is what makes it the Epic's child, which is the whole of
+    /// how a cut's tickets hang off a brief on this board: the JQL
+    /// `parent = <epic key>` finds them afterwards, and nothing else on the
+    /// issue says which brief it came from. The key written is the filing's and
+    /// not [`NewTicket::project`]'s — both are this Epic, and the filing's is
+    /// the spelling the site itself answered with.
+    ///
+    /// One request for the issue, as [`create_brief`](Self::create_brief) is
+    /// one: the label and the assignee ride in it rather than being written
+    /// after, because nothing here can take an issue back and a child that lost
+    /// either is a ticket no later run finds or no queue ever offers. The
+    /// assignee is Jira's `accountId`, which is what [`viewer`](Self::viewer)
+    /// answered and the only way a Jira user is addressed.
+    ///
+    /// [`TASK`] is the one value warlock names that no draft decided, and Jira
+    /// requires it. Nothing else is written: no priority, no estimate, no
+    /// sprint, no component and no custom field.
+    ///
+    /// The id and the identifier are both the key, which is the whole of how
+    /// this board names an issue — a link is written by key, a cut record holds
+    /// the key and a person types the key — so the numeric `id` beside it in the
+    /// answer is read by nothing.
+    fn create_ticket(&self, issue: &NewTicket<'_>, filing: &Settled) -> Result<FiledTicket, Error> {
+        let (base_url, project_key) = self.site()?;
+        let created = self.calls.call(
+            Method::POST,
+            ISSUE,
+            json!({
+                "fields": {
+                    "project": { "key": project_key },
+                    "issuetype": { "name": TASK },
+                    "parent": { "key": filing.epic },
+                    "summary": issue.title,
+                    "labels": [issue.label],
+                    "assignee": { "accountId": issue.assignee },
+                    "description": document_for(issue.body),
+                }
+            }),
+        )?;
+        let key = created
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("key"))?
+            .to_owned();
+
+        self.begun(&key, &filing.status)?;
+
+        Ok(FiledTicket {
+            id: key.clone(),
+            identifier: key.clone(),
+            url: browse(base_url, &key),
+        })
     }
 
     fn create_relation(&self, _blocker: &str, _waiting: &str) -> Result<String, Error> {
@@ -837,18 +955,54 @@ fn comments(key: &str, read: usize) -> String {
     format!("{ISSUE}/{key}/comment?startAt={read}&maxResults={COMMENTS_PAGE}&orderBy=created")
 }
 
+/// Where one issue's moves are read and where one of them is spent: the same
+/// path for both, a GET answering what the workflow offers from where the issue
+/// stands and a POST taking one of them by its id.
+fn transitions(key: &str) -> String {
+    format!("{ISSUE}/{key}/transitions")
+}
+
+/// The first transition the issue offers into a status of that name, by the id
+/// a POST spends it with, or `None` when it offers none.
+///
+/// The name and not the category, for the reason [`Jira::begun`] states: a
+/// workflow can hold two statuses in one category, and which of them a caller
+/// meant is a thing only the name says. Compared as [`same_name`] compares —
+/// trimmed and case-folded — because the name on this side was read off a
+/// status and the one on the wire is the board's own word for where a
+/// transition lands.
+///
+/// An answer carrying no `transitions` at all is malformed and not an issue with
+/// nowhere to go: a workflow always offers something from where an issue stands,
+/// so an answer with no list in it is bytes a proxy decided to send.
+fn chosen(offered: &Value, status: &str) -> Result<Option<String>, Error> {
+    let offered = offered
+        .get("transitions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| missing("transitions"))?;
+
+    Ok(offered.iter().find_map(|transition| {
+        let name = transition.get("to")?.get("name")?.as_str()?;
+        let id = transition.get("id")?.as_str()?;
+
+        same_name(name, status).then(|| id.to_owned())
+    }))
+}
+
 /// One issue's status as a read answers it: the name a refusal prints, and
-/// whether the brief is open for drafting.
+/// whether nobody has started it.
 ///
 /// The two come apart on purpose. The name is a site's own word — `To Do` on one
 /// board and `Triage` on the next — so the judgement is made on the category
 /// Jira files that status under, and the name only ever rides back to be printed.
 /// [`Category::New`] is the one category a brief may be cut in: an Epic somebody
-/// has started or finished is not work to file slices against.
+/// has started or finished is not work to file slices against. It is the same
+/// judgement [`Jira::begun`] makes of a child that was just filed, which is why
+/// the flag is a category and not a word about drafting.
 ///
 /// A status with no category, or one spelling a word [`Category::of`] does not
-/// know, is not draftable: an Epic warlock cannot place is left alone rather
-/// than offered as fresh work.
+/// know, is not one: an Epic warlock cannot place is left alone rather than
+/// offered as fresh work, and a child that landed in one is moved.
 fn standing(status: Option<&Value>) -> (Option<String>, bool) {
     let name = status
         .and_then(|status| status.get("name"))

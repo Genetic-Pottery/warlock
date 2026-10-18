@@ -359,15 +359,6 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
         (
-            "create_ticket",
-            board
-                .create_ticket(
-                    &NewTicket::new("A slice", "## Goal", BRIEF, "area/pay", "me"),
-                    &a_filing(),
-                )
-                .err(),
-        ),
-        (
             "create_relation",
             board.create_relation("PAY-1", "PAY-2").err(),
         ),
@@ -394,6 +385,10 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     verbs.push(("brief_named", board.brief_named(NAME).err()));
     verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
     verbs.push(("ticket_filing", board.ticket_filing(BRIEF).err()));
+    verbs.push((
+        "create_ticket",
+        board.create_ticket(&a_draft(), &a_filing()).err(),
+    ));
     verbs
 }
 
@@ -1903,6 +1898,439 @@ fn the_pre_flight_sends_no_mutation_and_reads_only_under_the_newer_api() {
         assert!(path.starts_with("/rest/api/3/"), "{path}");
         assert!(!path.contains("/rest/api/2"), "{path}");
         assert_eq!(body, Value::Null, "{path}");
+    }
+}
+
+/// The key the child create answers, which is the whole of how this board names
+/// the issue it just filed: the id a link is written with, the identifier a cut
+/// record holds and the key a person types are all this.
+const CHILD: &str = "PAY-20";
+
+/// One draft's title, as a slice hands it over: the summary a child carries.
+const DRAFT: &str = "Read the Epic";
+
+/// That draft's body, short enough for the ADF tree it becomes to be spelled
+/// out beside it: a heading and a paragraph.
+const DRAFT_BODY: &str = "## Goal\n\nBy its key.\n";
+
+/// The draft every create below files. The project is the Epic's key, which is
+/// what `planned.rs` takes from `fetch_brief`'s id on a Jira scope, and the
+/// assignee is the `accountId` [`Board::viewer`] answered.
+fn a_draft() -> NewTicket<'static> {
+    NewTicket::new(DRAFT, DRAFT_BODY, BRIEF, LABEL, ACCOUNT)
+}
+
+/// The one request that files a child, as the stand-in records it. Spelled out
+/// rather than built from `adf::document_for` and the module's own constants,
+/// for the reason [`filed`] spells its own: a field added or dropped, the parent
+/// moving, the type renamed or the converter's tree changing is a failure here
+/// and not two expressions that moved together.
+fn filed_child() -> (Method, String, Value) {
+    (
+        Method::POST,
+        "/rest/api/3/issue".to_owned(),
+        json!({
+            "fields": {
+                // The project is the record's key, as the brief's create is.
+                "project": { "key": PROJECT },
+                // Named because Jira requires it and takes no default from the
+                // project: the one value on a child no draft decided.
+                "issuetype": { "name": "Task" },
+                // What makes the issue the Epic's child, so that the JQL
+                // `parent = PAY-14` finds it afterwards.
+                "parent": { "key": BRIEF },
+                "summary": DRAFT,
+                "labels": [LABEL],
+                // Jira's `accountId`, which is the only way a user is addressed.
+                "assignee": { "accountId": ACCOUNT },
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "heading",
+                            "attrs": { "level": 2 },
+                            "content": [{ "type": "text", "text": "Goal" }],
+                        },
+                        {
+                            "type": "paragraph",
+                            "content": [{ "type": "text", "text": "By its key." }],
+                        },
+                    ],
+                },
+            }
+        }),
+    )
+}
+
+/// The status read that follows a child's create: a create answers an `id`, a
+/// `key` and a `self` and says nothing about status, so where the workflow's
+/// initial transition put the child is read back by its key.
+fn status_of(key: &str) -> (Method, String, Value) {
+    (
+        Method::GET,
+        format!("/rest/api/3/issue/{key}?fields=status"),
+        Value::Null,
+    )
+}
+
+/// A freshly filed child as that read answers it: the status the workflow opened
+/// it in, and the category Jira files that status under.
+fn landed(status: &str, category: &str) -> Value {
+    json!({
+        "id": "10050",
+        "key": CHILD,
+        "fields": { "status": { "name": status, "statusCategory": { "key": category } } },
+    })
+}
+
+/// Where the moves an issue offers are read and where one of them is spent: the
+/// same path, which is why both calls are built from this.
+fn moves(key: &str) -> String {
+    format!("/rest/api/3/issue/{key}/transitions")
+}
+
+/// The read of what the workflow offers from where the child stands.
+fn offered(key: &str) -> (Method, String, Value) {
+    (Method::GET, moves(key), Value::Null)
+}
+
+/// The transitions an issue offers, each by its own id and the status its `to`
+/// lands in: what a move is chosen out of.
+fn transitions(offers: &[(&str, &str, &str)]) -> Value {
+    let transitions: Vec<Value> = offers
+        .iter()
+        .map(|(id, name, category)| {
+            json!({
+                "id": id,
+                "name": format!("Move to {name}"),
+                "to": { "name": name, "statusCategory": { "key": category } },
+            })
+        })
+        .collect();
+
+    json!({ "expand": "transitions", "transitions": transitions })
+}
+
+/// The move itself: a POST to the same path, carrying the id of the transition
+/// and nothing else.
+fn moved(key: &str, transition: &str) -> (Method, String, Value) {
+    (
+        Method::POST,
+        moves(key),
+        json!({ "transition": { "id": transition } }),
+    )
+}
+
+/// A default workflow, from a status a ticket nobody has started belongs in.
+fn a_default_workflow() -> Value {
+    transitions(&[
+        ("11", TO_DO, "new"),
+        ("21", "In Progress", "indeterminate"),
+        ("31", "Done", "done"),
+    ])
+}
+
+#[test]
+fn a_draft_is_filed_as_a_child_of_the_epic_carrying_the_label_the_assignee_and_adf() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(
+                json!({ "id": "10050", "key": CHILD, "self": "https://example.atlassian.net/rest/api/3/issue/10050" }),
+            ),
+            Ok(landed(TO_DO, "new")),
+        ]),
+        a_scope(),
+    );
+
+    let ticket = board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect("the stand-in answered");
+
+    // The key three ways: the id a link is written with, the identifier a cut
+    // record holds and the URL a person opens. The numeric id beside it in the
+    // answer is read by nothing.
+    assert_eq!(ticket.id(), CHILD);
+    assert_eq!(ticket.identifier(), CHILD);
+    assert_eq!(ticket.url(), format!("{SITE}/browse/{CHILD}"));
+    // One request to file it — the label and the assignee are in it, because
+    // nothing here can take an issue back — and one read after it, which is the
+    // only way to tell where the workflow opened the child. The child landed in
+    // a `new` category, so nothing is spent moving it.
+    assert_eq!(
+        board.calls.made(),
+        [filed_child(), status_of(CHILD)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn the_parent_is_the_key_the_pre_flight_settled_and_not_the_one_the_draft_carries() {
+    // Both name this Epic, and the filing's is the spelling the site itself
+    // answered with: a child filed under a key Jira does not hold is a ticket
+    // the JQL `parent = PAY-14` never finds.
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "key": CHILD })), Ok(landed(TO_DO, "new"))]),
+        a_scope(),
+    );
+
+    board
+        .create_ticket(
+            &NewTicket::new(DRAFT, DRAFT_BODY, "pay-14", LABEL, ACCOUNT),
+            &a_filing(),
+        )
+        .expect("the stand-in answered");
+
+    assert_eq!(board.calls.made()[0], filed_child());
+}
+
+#[test]
+fn a_child_carries_what_the_draft_decided_and_no_field_warlock_invented() {
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "key": CHILD })), Ok(landed(TO_DO, "new"))]),
+        a_scope(),
+    );
+
+    board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect("the stand-in answered");
+
+    let (_, _, body) = board.calls.made().remove(0);
+    let fields = body["fields"]
+        .as_object()
+        .expect("the create writes a `fields` object");
+    let sent: Vec<&str> = fields.keys().map(String::as_str).collect();
+
+    // No priority, no estimate, no sprint, no component and no custom field: a
+    // ticket carries what a draft decided and nothing more. No status either —
+    // Jira takes a created issue's status from the workflow and ignores one in
+    // the body.
+    assert_eq!(
+        sent,
+        [
+            "project",
+            "issuetype",
+            "parent",
+            "summary",
+            "labels",
+            "assignee",
+            "description"
+        ],
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn a_child_that_landed_outside_a_new_category_is_transitioned_into_one() {
+    // A workflow whose initial transition opens an issue in progress, which is
+    // the whole reason the status is read back at all.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(json!({ "key": CHILD })),
+            Ok(landed("In Progress", "indeterminate")),
+            Ok(a_default_workflow()),
+            // A transition answers 204 with nothing after the headers.
+            Ok(Value::Null),
+        ]),
+        a_scope(),
+    );
+
+    let ticket = board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect("the stand-in answered");
+
+    assert_eq!(ticket.identifier(), CHILD);
+    // The transitions read, then the one whose `to` is the status the pre-flight
+    // settled, posted by its id. A fifth call would panic the stand-in, which is
+    // how "one request per mutation" is asserted.
+    assert_eq!(
+        board.calls.made(),
+        [
+            filed_child(),
+            status_of(CHILD),
+            offered(CHILD),
+            moved(CHILD, "11")
+        ],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn the_transition_is_chosen_by_the_status_name_and_never_by_its_category() {
+    // Two transitions into the `new` category, which is the corner a choice by
+    // category would get wrong: the name is what the pre-flight settled, so the
+    // name is what decides. Spelled with different case and spacing, because the
+    // word on this side was read off the project's statuses and the word on the
+    // wire is the board's own.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(json!({ "key": CHILD })),
+            Ok(landed("In Progress", "indeterminate")),
+            Ok(transitions(&[
+                ("41", "Backlog", "new"),
+                ("11", "  to do  ", "new"),
+            ])),
+            Ok(Value::Null),
+        ]),
+        a_scope(),
+    );
+
+    board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect("the stand-in answered");
+
+    assert_eq!(board.calls.made()[3], moved(CHILD, "11"));
+}
+
+#[test]
+fn a_workflow_offering_no_transition_into_that_status_posts_nothing_and_the_child_stands() {
+    // The issue exists, it is the Epic's child and it carries the label: there
+    // is no second way to ask for a status this workflow cannot reach, so the
+    // cut goes on with the ticket it filed.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(json!({ "key": CHILD })),
+            Ok(landed("In Progress", "indeterminate")),
+            Ok(transitions(&[("31", "Done", "done")])),
+        ]),
+        a_scope(),
+    );
+
+    let ticket = board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect("a child that cannot be moved is still a child");
+
+    assert_eq!(ticket.identifier(), CHILD);
+    assert_eq!(
+        board.calls.made(),
+        [filed_child(), status_of(CHILD), offered(CHILD)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn a_child_create_jira_refuses_is_reported_in_jiras_words_and_is_not_retried() {
+    let said = "parent: Issue type Task does not support a parent.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect_err("it was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    // One request and nothing read after it: nothing on this side can tell a
+    // refusal that arrived before the issue existed from one that arrived
+    // after, so the person decides.
+    assert_eq!(
+        board.calls.made(),
+        [filed_child()],
+        "the create was retried"
+    );
+}
+
+#[test]
+fn a_move_jira_refuses_is_reported_in_jiras_words_and_is_not_retried() {
+    let said = "It is not on the appropriate workflow transition.";
+    let board = Jira::new(
+        Calling::answering([
+            Ok(json!({ "key": CHILD })),
+            Ok(landed("In Progress", "indeterminate")),
+            Ok(a_default_workflow()),
+            Err(Error::Refused {
+                board: JIRA,
+                message: said.to_owned(),
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let error = board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect_err("the transition was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    assert_eq!(board.calls.made().len(), 4, "{:?}", board.calls.made());
+}
+
+#[test]
+fn a_child_create_answering_no_key_is_malformed_and_nothing_is_read_after_it() {
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "id": "10050" }))]),
+        a_scope(),
+    );
+
+    let error = board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect_err("not the answer asked for");
+
+    assert!(
+        matches!(error, Error::Malformed { board: JIRA, .. }),
+        "{error:?}"
+    );
+    assert_eq!(board.calls.made(), [filed_child()]);
+}
+
+#[test]
+fn a_status_read_with_no_fields_or_a_workflow_with_no_transitions_is_malformed() {
+    for answers in [
+        vec![Ok(json!({ "key": CHILD })), Ok(json!({ "key": CHILD }))],
+        // A workflow always offers something from where an issue stands, so an
+        // answer with no list in it is bytes a proxy decided to send.
+        vec![
+            Ok(json!({ "key": CHILD })),
+            Ok(landed("In Progress", "indeterminate")),
+            Ok(json!({ "expand": "transitions" })),
+        ],
+    ] {
+        let board = Jira::new(Calling::answering(answers), a_scope());
+
+        let error = board
+            .create_ticket(&a_draft(), &a_filing())
+            .expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn every_call_a_child_takes_goes_under_the_newer_api_and_only_the_mutations_post() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(json!({ "key": CHILD })),
+            Ok(landed("In Progress", "indeterminate")),
+            Ok(a_default_workflow()),
+            Ok(Value::Null),
+        ]),
+        a_scope(),
+    );
+
+    board
+        .create_ticket(&a_draft(), &a_filing())
+        .expect("the stand-in answered");
+
+    for (method, path, body) in board.calls.made() {
+        assert!(path.starts_with("/rest/api/3/"), "{path}");
+        assert!(!path.contains("/rest/api/2"), "{path}");
+        // A read sends no body at all, and the two that carry one are the
+        // create and the move.
+        if method == Method::GET {
+            assert_eq!(body, Value::Null, "{path}");
+        } else {
+            assert_eq!(method, Method::POST, "{path}");
+            assert_ne!(body, Value::Null, "{path}");
+        }
     }
 }
 
