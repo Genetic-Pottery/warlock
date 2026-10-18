@@ -257,12 +257,13 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but nine refuses as this stands: the two a push makes, the
+/// Every verb but ten refuses as this stands: the two a push makes, the
 /// brief-by-name lookup and the brief create; the two a cut reads first, for
 /// whose key it is and for the brief itself; the pre-flight a cut settles
 /// before it files anything and the create that files each of a slice's drafts;
-/// the edge between two of those tickets and the note that records the slice;
-/// and the listing a bare `warlock draft` prints. The requests themselves
+/// the edge between two of those tickets, the note that records the slice and
+/// the brief's own move once every slice is settled; and the listing a bare
+/// `warlock draft` prints. The requests themselves
 /// arrive a slice at a time, and a board that refuses is what keeps a flow
 /// which reaches a verb nobody has written yet a sentence rather than a panic.
 #[derive(Debug)]
@@ -401,11 +402,9 @@ impl<C: Calls> Jira<C> {
     /// landed.
     ///
     /// A move is a transition and there is nothing else it could be: Jira takes
-    /// no status in a create body and none in an edit either. The transition is
-    /// chosen on the name its `to` carries, which is the name the pre-flight
-    /// read off the project's own statuses, and never on the category — a
-    /// workflow holding two `new` statuses would otherwise put the child in
-    /// whichever one the site happened to list a transition to first.
+    /// no status in a create body and none in an edit either. The status asked
+    /// for is the name the pre-flight read off the project's own statuses, and
+    /// [`shifted`](Self::shifted) is what spends the move.
     ///
     /// A workflow offering no transition into that status posts nothing and
     /// leaves the child where it landed: the issue exists, it is the Epic's
@@ -430,20 +429,42 @@ impl<C: Calls> Jira<C> {
             return Ok(());
         }
 
+        self.shifted(key, status).map(drop)
+    }
+
+    /// One issue moved into the status of that name, and whether its workflow
+    /// offered a way there at all.
+    ///
+    /// The one place this module spends a transition, for the child
+    /// [`begun`](Self::begun) has just filed and for the Epic
+    /// [`move_brief`](Board::move_brief) has just settled alike: a read of what
+    /// the workflow offers from where the issue stands, then a POST of the one
+    /// whose `to` is called that, by its id.
+    ///
+    /// The choice is [`chosen`]'s, on the name and never on the status
+    /// category: a workflow can hold two statuses in one category, and warlock
+    /// taking whichever one the site listed a transition to first would move the
+    /// issue somewhere nobody asked for.
+    ///
+    /// `false` with nothing posted where the workflow offers no such move, so a
+    /// caller cannot mistake it for a move that happened. One request for the
+    /// mutation and no retry, per this module's rule: a transition Jira turns
+    /// down is the caller's to report in Jira's own words.
+    fn shifted(&self, key: &str, status: &str) -> Result<bool, Error> {
         let offered = self
             .calls
             .call(Method::GET, &transitions(key), Value::Null)?;
         let Some(transition) = chosen(&offered, status)? else {
-            return Ok(());
+            return Ok(false);
         };
 
-        self.calls
-            .call(
-                Method::POST,
-                &transitions(key),
-                json!({ "transition": { "id": transition } }),
-            )
-            .map(drop)
+        self.calls.call(
+            Method::POST,
+            &transitions(key),
+            json!({ "transition": { "id": transition } }),
+        )?;
+
+        Ok(true)
     }
 
     /// The refusal of a verb no slice has written for this board yet, with
@@ -511,8 +532,34 @@ impl<C: Calls> Board for Jira<C> {
             .ok_or_else(|| missing("accountId"))
     }
 
-    fn move_brief(&self, _project: &str, _status: &str) -> Result<bool, Error> {
-        self.untaught("move a brief")
+    /// Move the Epic into the status of that name, and `false` when its
+    /// workflow offers no way there.
+    ///
+    /// A transition and nothing else, for the reason a create writes no status:
+    /// Jira holds where an issue stands behind the workflow, so the only move
+    /// there is is one the issue itself offers. The name the caller gave is
+    /// matched against what each transition's `to` is called —
+    /// [`same_name`]'s comparison, trimmed and case-folded, because the caller's
+    /// word is warlock's own and the word on the wire is the board's — and the
+    /// one that matches is posted by its id. On a default workflow the name a
+    /// settled cut asks for lands the Epic in an `indeterminate` status.
+    ///
+    /// Never by status category, which is the near miss worth naming: a workflow
+    /// where `In Progress` and `In Review` are both `indeterminate` would let a
+    /// freshly cut Epic jump straight to review. The name is the whole of what
+    /// the caller asked for and the whole of what decides.
+    ///
+    /// `false` with nothing posted, and not an error, where no transition lands
+    /// there: the tickets of a cut that has just settled exist whatever the
+    /// Epic's column does, so `cut::finish` prints the line it prints for a
+    /// board with no such status and carries on.
+    ///
+    /// `project` is the Epic's key, which is how this board names a brief
+    /// everywhere — the id [`fetch_brief`](Self::fetch_brief) and
+    /// [`ticket_filing`](Self::ticket_filing) both answer with.
+    fn move_brief(&self, project: &str, status: &str) -> Result<bool, Error> {
+        self.site()?;
+        self.shifted(project, status)
     }
 
     fn ticket_brief(&self, _issue: &str) -> Result<Option<TicketBrief>, Error> {
@@ -1053,7 +1100,7 @@ fn transitions(key: &str) -> String {
 /// The first transition the issue offers into a status of that name, by the id
 /// a POST spends it with, or `None` when it offers none.
 ///
-/// The name and not the category, for the reason [`Jira::begun`] states: a
+/// The name and not the category, for the reason [`Jira::shifted`] states: a
 /// workflow can hold two statuses in one category, and which of them a caller
 /// meant is a thing only the name says. Compared as [`same_name`] compares —
 /// trimmed and case-folded — because the name on this side was read off a

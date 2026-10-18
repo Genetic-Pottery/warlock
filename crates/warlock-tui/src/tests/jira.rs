@@ -14,6 +14,7 @@ use crate::adf::document_for;
 use crate::board::{Board, Error, Filable, NewBrief, NewTicket};
 use crate::brief::{Slice, scope_block_in};
 use crate::cut;
+use crate::queue::IN_PROGRESS;
 use crate::stubs::Calling;
 
 const EMAIL: &str = "nobody@example.com";
@@ -353,7 +354,6 @@ fn field_errors_are_named_after_the_messages() {
 /// reader checks either.
 fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     vec![
-        ("move_brief", board.move_brief("10001", "In Review").err()),
         ("ticket_brief", board.ticket_brief("PAY-1").err()),
         ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
         ("scope_queue", board.scope_queue("me").err()),
@@ -389,6 +389,7 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         "comment_on_brief",
         board.comment_on_brief(BRIEF, A_CUT).err(),
     ));
+    verbs.push(("move_brief", board.move_brief(BRIEF, IN_PROGRESS).err()));
     verbs
 }
 
@@ -2598,6 +2599,170 @@ fn the_edge_and_the_note_are_one_post_each_under_the_newer_api() {
         assert!(!path.contains("/rest/api/2"), "{path}");
         assert_ne!(body, Value::Null, "{path}");
     }
+}
+
+/// A workflow holding the two statuses a choice by category could not tell
+/// apart: both land in `indeterminate`, and an Epic a cut has just settled
+/// jumping to review would be warlock saying its slices had been read.
+fn two_indeterminate_moves() -> Value {
+    transitions(&[
+        ("51", "In Review", "indeterminate"),
+        // Spelled in another case and with spacing around it, because the name
+        // on this side is warlock's own word and the name on the wire is the
+        // board's.
+        ("21", "  in progress  ", "indeterminate"),
+    ])
+}
+
+/// A workflow offering nothing but the way to done, which is a board that
+/// cannot reach the status a settled cut asks for.
+fn no_way_to_work() -> Value {
+    transitions(&[("31", "Done", "done")])
+}
+
+#[test]
+fn the_epic_is_moved_by_the_transition_whose_destination_carries_that_name() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_default_workflow()),
+            // A transition answers 204 with nothing after the headers.
+            Ok(Value::Null),
+        ]),
+        a_scope(),
+    );
+
+    let settled = board
+        .move_brief(BRIEF, IN_PROGRESS)
+        .expect("the stand-in answered");
+
+    assert!(settled, "the workflow offers a move there");
+    // The moves the Epic offers read, then the one whose `to` is called that
+    // posted by its id and nothing else in the body. A third call would panic
+    // the stand-in, which is how "one request per mutation" is asserted.
+    assert_eq!(
+        board.calls.made(),
+        [offered(BRIEF), moved(BRIEF, "21")],
+        "{:?}",
+        board.calls.made()
+    );
+    // And on a default workflow that is the `indeterminate` status, which is
+    // where a cut leaves a brief every slice of is settled.
+    assert_eq!(
+        a_default_workflow()["transitions"][1]["to"],
+        json!({ "name": IN_PROGRESS, "statusCategory": { "key": "indeterminate" } })
+    );
+}
+
+#[test]
+fn a_workflow_offering_no_move_of_that_name_answers_so_and_posts_nothing() {
+    // An answer and not a failure: the tickets a cut filed exist whatever the
+    // Epic's own column does next.
+    let board = Jira::new(Calling::answering([Ok(no_way_to_work())]), a_scope());
+
+    let settled = board
+        .move_brief(BRIEF, IN_PROGRESS)
+        .expect("no such status is an answer");
+
+    assert!(!settled);
+    assert_eq!(
+        board.calls.made(),
+        [offered(BRIEF)],
+        "{:?}",
+        board.calls.made()
+    );
+}
+
+#[test]
+fn the_epics_move_is_chosen_by_name_and_never_by_the_status_category() {
+    let board = Jira::new(
+        Calling::answering([Ok(two_indeterminate_moves()), Ok(Value::Null)]),
+        a_scope(),
+    );
+
+    assert!(
+        board
+            .move_brief(BRIEF, IN_PROGRESS)
+            .expect("the stand-in answered")
+    );
+
+    // `21` and never `51`: both land in `indeterminate`, so the name the caller
+    // gave is the whole of what tells them apart.
+    assert_eq!(board.calls.made()[1], moved(BRIEF, "21"));
+}
+
+#[test]
+fn a_settled_cut_says_the_line_the_boards_own_answer_earned() {
+    let moving = Jira::new(
+        Calling::answering([Ok(a_default_workflow()), Ok(Value::Null)]),
+        a_scope(),
+    );
+    let staying = Jira::new(Calling::answering([Ok(no_way_to_work())]), a_scope());
+
+    let moved_on = cut::finish(&moving, BRIEF);
+    let stayed = cut::finish(&staying, BRIEF);
+
+    assert_eq!(
+        moved_on,
+        format!("every slice is settled, so the project moved to `{IN_PROGRESS}`")
+    );
+    // The very line a Linear workspace with no such column gets: a workflow
+    // that cannot reach the status is reported and worked past.
+    assert_eq!(
+        stayed,
+        format!(
+            "every slice is settled, and the workspace has no project status called \
+             `{IN_PROGRESS}`, so the project was not moved"
+        )
+    );
+}
+
+#[test]
+fn an_epics_move_jira_refuses_is_reported_in_jiras_words_and_is_not_retried() {
+    let said = "It is not on the appropriate workflow transition.";
+    let board = Jira::new(
+        Calling::answering([
+            Ok(a_default_workflow()),
+            Err(Error::Refused {
+                board: JIRA,
+                message: said.to_owned(),
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let error = board
+        .move_brief(BRIEF, IN_PROGRESS)
+        .expect_err("the transition was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    // One POST and no second: the caller words the failure and the person
+    // decides, as it does for a move of a freshly filed child.
+    assert_eq!(
+        board.calls.made(),
+        [offered(BRIEF), moved(BRIEF, "21")],
+        "the move was retried"
+    );
+}
+
+#[test]
+fn an_epics_moves_read_with_no_transitions_is_malformed_and_nothing_is_posted() {
+    // A workflow always offers something from where an issue stands, so an
+    // answer with no list in it is bytes a proxy decided to send — not an Epic
+    // with nowhere to go, which is the `false` above.
+    let board = Jira::new(
+        Calling::answering([Ok(json!({ "expand": "transitions" }))]),
+        a_scope(),
+    );
+
+    let error = board
+        .move_brief(BRIEF, IN_PROGRESS)
+        .expect_err("not the answer asked for");
+
+    assert!(
+        matches!(error, Error::Malformed { board: JIRA, .. }),
+        "{error:?}"
+    );
+    assert_eq!(board.calls.made(), [offered(BRIEF)]);
 }
 
 #[test]
