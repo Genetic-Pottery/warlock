@@ -3,7 +3,7 @@ use std::io;
 
 use serde_json::{Value, json};
 use ureq::http::Method;
-use warlock_engine::ScopeRecord;
+use warlock_engine::{BoardScope, ScopeRecord};
 
 use super::{
     Calls, Client, EMAIL_TOKEN, JIRA, Jira, REQUEST_TIMEOUT, Settled, answer, authorization,
@@ -11,10 +11,12 @@ use super::{
 };
 
 use crate::adf::document_for;
-use crate::board::{Board, Category, Error, Filable, Holder, Moved, NewBrief, NewTicket, Priority};
+use crate::board::{
+    Assignee, Board, Category, Error, Filable, Holder, Moved, NewBrief, NewTicket, Priority,
+};
 use crate::brief::{Slice, scope_block_in};
 use crate::cut;
-use crate::queue::IN_PROGRESS;
+use crate::queue::{IN_PROGRESS, Named, Refusal, take_named};
 use crate::stubs::Calling;
 
 const EMAIL: &str = "nobody@example.com";
@@ -355,7 +357,6 @@ fn field_errors_are_named_after_the_messages() {
 fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     vec![
         ("ticket_brief", board.ticket_brief("PAY-1").err()),
-        ("named_ticket", board.named_ticket(1).err()),
         (
             "comment_on_ticket",
             board.comment_on_ticket("PAY-1", "a note").err(),
@@ -374,6 +375,7 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
     verbs.push(("planned_briefs", board.planned_briefs().err()));
     verbs.push(("brief_named", board.brief_named(NAME).err()));
     verbs.push(("scope_queue", board.scope_queue(ACCOUNT).err()));
+    verbs.push(("named_ticket", board.named_ticket(1).err()));
     verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
     verbs.push(("ticket_filing", board.ticket_filing(BRIEF).err()));
     verbs.push((
@@ -3388,6 +3390,431 @@ fn a_link_answer_missing_any_field_a_blocker_is_read_out_of_is_malformed() {
         matches!(error, Error::Malformed { board: JIRA, .. }),
         "{error:?}"
     );
+}
+
+/// The number a caller split off `PAY-31`, which is the whole of what the
+/// named read is told: the prefix was checked against the scope before anything
+/// was asked, so the project the key is built from can only come off the record.
+const NUMBER: u64 = 31;
+
+/// The name the site has for the account the key authenticates as: the half of
+/// an assignee a refusal prints, where the `accountId` beside it is the half a
+/// check is made on.
+const HOLDER: &str = "Nobody At All";
+
+/// One named ticket as the issue read answers it: the very ticket a queue read
+/// would have answered, plus the three facts the queue answered with a filter.
+fn a_named_ticket(project: &str, labels: Value, assignee: Value) -> Value {
+    let mut issue = a_ticket(TO_DO, "new", Some("High"));
+
+    // The id rides along because a real answer carries one, and nothing reads
+    // it: a scope record names a project by its key.
+    issue["fields"]["project"] = json!({ "id": "10000", "key": project });
+    issue["fields"]["labels"] = labels;
+    issue["fields"]["assignee"] = assignee;
+    issue
+}
+
+/// That ticket inside the scope: the record's own project, the record's label
+/// among the ones it carries, and the account the key belongs to on it.
+fn a_ticket_of_this_scope() -> Value {
+    a_named_ticket(
+        PROJECT,
+        json!([LABEL, "backend"]),
+        json!({ "accountId": ACCOUNT, "displayName": HOLDER }),
+    )
+}
+
+/// A named ticket the read would otherwise have parsed, with the field at that
+/// JSON pointer taken off it.
+fn lacking(pointer: &str) -> Value {
+    let mut issue = a_ticket_of_this_scope();
+    let (parent, field) = pointer
+        .rsplit_once('/')
+        .expect("a JSON pointer, which begins with a slash");
+
+    issue
+        .pointer_mut(parent)
+        .and_then(Value::as_object_mut)
+        .expect("a ticket to take a field off")
+        .remove(field)
+        .expect("the field was there to take");
+
+    issue
+}
+
+/// The named read, as the stand-in records it: a GET on the issue itself, with
+/// the key and the fields spelled out rather than built from the module's own
+/// pieces — for the reason [`asked`] spells its own. A filter arriving in the
+/// path, a field dropping out of the list, the key being built from anything
+/// but the record's project, or the read becoming a search is a failure here
+/// and not two expressions that moved together.
+fn by_key(key: &str) -> (Method, String, Value) {
+    (
+        Method::GET,
+        format!(
+            "/rest/api/3/issue/{key}\
+             ?fields=summary,status,description,priority,issuelinks,project,labels,assignee"
+        ),
+        Value::Null,
+    )
+}
+
+/// The board reading that answer, and the ticket it answered with.
+fn named(issue: Value) -> (Jira<Calling>, crate::board::NamedTicket) {
+    let board = Jira::new(Calling::answering([Ok(issue)]), a_scope());
+    let found = board
+        .named_ticket(NUMBER)
+        .expect("the stand-in answered")
+        .expect("the stand-in answered with the ticket");
+
+    (board, found)
+}
+
+#[test]
+fn a_named_ticket_is_read_by_the_key_the_records_project_and_the_number_make() {
+    let (board, found) = named(a_ticket_of_this_scope());
+
+    // The key the record's project and the number make, which is the whole
+    // address: `PAY-31` and not a search for a ticket numbered 31.
+    assert_eq!(found.issue().identifier(), TICKET);
+    // One request, a GET with no body, and a second would panic the stand-in.
+    assert_eq!(board.calls.made(), [by_key(TICKET)]);
+}
+
+#[test]
+fn the_named_read_carries_none_of_the_queues_filters() {
+    let (board, _) = named(a_ticket_of_this_scope());
+
+    let made = board.calls.made();
+    let [(method, path, body)] = made.as_slice() else {
+        panic!("one request: {made:?}")
+    };
+    let (addressed, query) = path.split_once('?').expect("the fields ride in the path");
+
+    assert_eq!(*method, Method::GET);
+    assert_eq!(*body, Value::Null);
+    assert_eq!(addressed, format!("/rest/api/3/issue/{TICKET}"));
+    // The fields asked for and nothing else: no second query parameter is a
+    // place a filter could be hiding.
+    assert!(query.starts_with("fields="), "{query}");
+    assert!(!query.contains('&'), "{query}");
+    // Label, project and assignee are read as fields and never filtered on,
+    // which is the whole point of this read: a ticket dropped by a filter
+    // cannot say which filter dropped it, so the three arrive as facts to be
+    // checked. The field names are in the path; the record's label and the
+    // caller's account — the values a filter would be written against — are
+    // not.
+    assert!(!path.contains(LABEL), "the label is filtered on: {path}");
+    assert!(
+        !path.contains(ACCOUNT),
+        "the account is filtered on: {path}"
+    );
+    // And no status clause, for the reason the state filter is off the Linear
+    // arm's own named read: a ticket that shipped last week is absent from the
+    // queue too, and refusing it as another project's work would be a lie.
+    assert!(!path.contains("statusCategory"), "{path}");
+    assert!(!path.contains("ORDER BY"), "{path}");
+    // Not a search at all, so none of the queue's JQL can reach it.
+    assert!(!path.contains("jql"), "{path}");
+    assert!(!path.contains("search"), "{path}");
+}
+
+#[test]
+fn a_named_ticket_is_the_same_value_a_queue_would_have_given() {
+    let queued = Jira::new(
+        Calling::answering([Ok(holding(&[a_ticket(TO_DO, "new", Some("High"))], None))]),
+        a_scope(),
+    );
+    let chosen = queued.scope_queue(ACCOUNT).expect("the stand-in answered");
+
+    let (_, found) = named(a_ticket_of_this_scope());
+
+    // Parsed by the queue's own function, so a named ticket and a chosen one
+    // are one type and the rules over them cannot drift.
+    assert_eq!(found.issue(), &chosen.issues()[0]);
+    assert_eq!(found.issue().title(), TITLE);
+    assert_eq!(found.issue().description(), TICKET_BODY);
+    assert_eq!(found.issue().state(), TO_DO);
+    assert_eq!(found.issue().state_type(), Category::New);
+    assert_eq!(found.issue().priority(), Priority::High);
+}
+
+#[test]
+fn a_named_ticket_carries_the_project_labels_and_assignee_the_queue_filtered_on() {
+    let (_, found) = named(a_ticket_of_this_scope());
+
+    // The project key and not its id: a scope record names a project `PAY`, so
+    // the two are comparable without resolving either.
+    assert_eq!(found.team(), PROJECT);
+    assert_eq!(found.labels(), [LABEL, "backend"]);
+    assert_eq!(found.assignee(), Some(&Assignee::new(ACCOUNT, HOLDER)));
+    // The id is what says whether a ticket is yours, and the name is what a
+    // refusal prints: two people on a site can share a display name.
+    assert_eq!(found.assignee().map(Assignee::id), Some(ACCOUNT));
+    assert_eq!(found.assignee().map(Assignee::name), Some(HOLDER));
+}
+
+#[test]
+fn the_three_facts_are_read_off_the_answer_and_never_off_the_record() {
+    // The site answering about another project, with neither the record's label
+    // nor its account on it: everything a check is made against is on the wire,
+    // so a reader that filled any of the three in from the record would answer
+    // the check with the request.
+    let (_, found) = named(a_named_ticket(
+        "ENG",
+        json!(["area/web"]),
+        json!({ "accountId": "5b10a2844c20165700ede000", "displayName": "Somebody Else" }),
+    ));
+
+    assert_eq!(found.team(), "ENG");
+    assert_eq!(found.labels(), ["area/web"]);
+    assert_eq!(
+        found.assignee().map(Assignee::name),
+        Some("Somebody Else"),
+        "the holder is the site's and not the key's"
+    );
+}
+
+#[test]
+fn a_ticket_with_no_labels_and_nobody_on_it_is_an_ordinary_answer() {
+    let (_, found) = named(a_named_ticket(PROJECT, json!([]), Value::Null));
+
+    // Neither is malformed: both are refusals the caller words, not answers
+    // this module cannot read.
+    assert_eq!(found.labels(), [] as [String; 0]);
+    assert_eq!(found.assignee(), None);
+}
+
+#[test]
+fn a_ticket_that_shipped_is_still_answered() {
+    let mut issue = a_ticket_of_this_scope();
+    issue["fields"]["status"] = json!({
+        "name": "Shipped to production",
+        "statusCategory": { "key": "done" },
+    });
+
+    let (_, found) = named(issue);
+
+    // No status filter is applied here on purpose: a finished ticket is absent
+    // from the queue too, and a refusal calling that "not in your project"
+    // would be a lie about the board. It comes back, and the caller refuses it
+    // for the fact that is true.
+    assert_eq!(found.issue().state(), "Shipped to production");
+    assert_eq!(found.issue().state_type(), Category::Settled);
+}
+
+#[test]
+fn a_key_the_site_has_no_issue_for_is_an_absence_rather_than_an_error() {
+    let board = Jira::new(
+        Calling::answering([Err(Error::Absent {
+            board: JIRA,
+            message: Some(
+                "Issue does not exist or you do not have permission to see it.".to_owned(),
+            ),
+        })]),
+        a_scope(),
+    );
+
+    // A number the project has not reached, as the Linear arm answers one: the
+    // caller has its own words for a ticket that is not there, and a 404 is not
+    // a failure to report in Jira's.
+    assert_eq!(
+        board
+            .named_ticket(9_999)
+            .expect("a 404 is an answer to this question"),
+        None
+    );
+    assert_eq!(board.calls.made(), [by_key("PAY-9999")]);
+}
+
+#[test]
+fn a_named_read_jira_refuses_is_reported_in_jiras_words_and_is_not_retried() {
+    let said = "You do not have the permission to see the specified issue.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board
+        .named_ticket(NUMBER)
+        .expect_err("a refusal is not an absence");
+
+    assert!(error.to_string().contains(said), "{error}");
+    // One request and no second: nothing here asks again to repair a refusal.
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "the read was retried");
+}
+
+#[test]
+fn a_named_answer_missing_any_fact_a_refusal_names_is_malformed() {
+    let mut answers: Vec<Value> = [
+        // The three the queue answered with a filter: a missing one is an
+        // answer no check can be decided from, so it is never read as an
+        // absence.
+        "/fields/project",
+        "/fields/project/key",
+        "/fields/labels",
+        "/fields/assignee",
+        "/fields/assignee/accountId",
+        "/fields/assignee/displayName",
+        // And the queue's own fields, since the ticket is parsed by its
+        // function.
+        "/key",
+        "/fields/status",
+    ]
+    .into_iter()
+    .map(lacking)
+    .collect();
+
+    // A labels field that is no list at all, which is the one way its absence
+    // is not read as a ticket carrying none.
+    let mut scrambled = a_ticket_of_this_scope();
+    scrambled["fields"]["labels"] = json!("area/pay");
+    answers.push(scrambled);
+    // And a label that is not a name.
+    let mut numbered = a_ticket_of_this_scope();
+    numbered["fields"]["labels"] = json!([7]);
+    answers.push(numbered);
+    // The whole of `fields`, which every one of the four is read out of.
+    answers.push(json!({ "key": TICKET }));
+
+    for answer in answers {
+        let board = Jira::new(Calling::answering([Ok(answer.clone())]), a_scope());
+
+        let error = board
+            .named_ticket(NUMBER)
+            .expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{answer}: {error:?}"
+        );
+        assert_eq!(board.calls.made().len(), 1, "no retry and no second read");
+    }
+}
+
+/// `PAY-31` taken or turned down, with the scope read off the very record the
+/// board was opened for.
+///
+/// The whole point of the three reads below is that nothing about the project,
+/// the label or the account reaches the request: the read is unfiltered, and
+/// the judgement is made here over facts the site stated. So the same
+/// [`a_scope`] record is both halves — what the board builds a key from and
+/// what a refusal names — and the account is the one the key authenticates as.
+fn taking(issue: Value) -> (Jira<Calling>, Named) {
+    let record = a_scope();
+    let board = Jira::new(Calling::answering([Ok(issue)]), record.clone());
+
+    let named = take_named(&board, BoardScope::of(&record), ACCOUNT, TICKET, &[])
+        .expect("the stand-in answered");
+
+    (board, named)
+}
+
+/// The printable reason `PAY-31` was turned down, which is what each refusal
+/// below is asserted as: the words are [`crate::queue`]'s own, shared with the
+/// Linear arm, and no Jira spelling of them exists to drift.
+fn turned_down(named: &Named) -> String {
+    match named {
+        Named::Refused(refused) => refused.to_string(),
+        Named::Taken(issue) => panic!("{} was taken", issue.identifier()),
+    }
+}
+
+#[test]
+fn a_named_jira_ticket_inside_the_scope_is_taken() {
+    let (board, named) = taking(a_ticket_of_this_scope());
+
+    // The control the three refusals below are read against: everything about
+    // this ticket is the record's, so each of them fails on the one fact it
+    // changes.
+    assert!(
+        matches!(&named, Named::Taken(issue) if issue.identifier() == TICKET),
+        "{named:?}"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "one request");
+}
+
+#[test]
+fn a_named_ticket_in_another_project_is_refused_naming_both_projects() {
+    let mut elsewhere = a_ticket_of_this_scope();
+    // The project the answer states, not the prefix that was typed: `PAY-31`
+    // is what was asked for, and the site answered with an issue filed under
+    // `ENG`.
+    elsewhere["fields"]["project"] = json!({ "id": "10001", "key": "ENG" });
+
+    let (board, named) = taking(elsewhere);
+
+    assert!(
+        matches!(&named, Named::Refused(Refusal::NotOnTeam { team, found })
+            if team == PROJECT && found == "ENG"),
+        "{named:?}"
+    );
+    assert_eq!(
+        turned_down(&named),
+        "on team `ENG`, and this scope routes to `PAY`"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "no second request");
+}
+
+#[test]
+fn a_named_ticket_without_the_records_label_is_refused_naming_the_label_it_wants() {
+    let mut unlabelled = a_ticket_of_this_scope();
+    unlabelled["fields"]["labels"] = json!(["area/web", "chore"]);
+
+    let (board, named) = taking(unlabelled);
+
+    // What it carries as well as what it is missing: the usual cause is a near
+    // miss rather than a ticket nobody labelled.
+    assert!(
+        matches!(&named, Named::Refused(Refusal::Unlabelled { label, carried })
+            if label == LABEL && carried == &["area/web", "chore"]),
+        "{named:?}"
+    );
+    assert_eq!(
+        turned_down(&named),
+        "not labelled `area/pay` — it carries area/web, chore"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "no second request");
+
+    let (bare, carrying_none) = taking(a_named_ticket(
+        PROJECT,
+        json!([]),
+        json!({ "accountId": ACCOUNT, "displayName": HOLDER }),
+    ));
+
+    assert_eq!(
+        turned_down(&carrying_none),
+        "not labelled `area/pay` — it carries no labels at all"
+    );
+    assert_eq!(bare.calls.made(), [by_key(TICKET)], "no second request");
+}
+
+#[test]
+fn a_named_ticket_somebody_else_holds_is_refused_naming_them() {
+    let mut theirs = a_ticket_of_this_scope();
+    // A different `accountId` under a display name the site holds: the id is
+    // what the check is made on, and the name is the half that gets printed.
+    theirs["fields"]["assignee"] = json!({
+        "accountId": "5b10a2844c20165700ede000",
+        "displayName": "Somebody Else",
+    });
+
+    let (board, named) = taking(theirs);
+
+    assert!(
+        matches!(&named, Named::Refused(Refusal::NotYours { holder })
+            if holder.as_deref() == Some("Somebody Else")),
+        "{named:?}"
+    );
+    assert_eq!(
+        turned_down(&named),
+        "assigned to Somebody Else and not to you"
+    );
+    assert_eq!(board.calls.made(), [by_key(TICKET)], "no second request");
 }
 
 /// The status a record names as the one a ticket in review belongs in, which is
