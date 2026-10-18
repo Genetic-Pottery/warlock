@@ -497,7 +497,9 @@ impl FetchedBrief {
     }
 }
 
-/// What [`Board::planned_briefs`] answers: slug and name, in Linear's order.
+/// What [`Board::planned_briefs`] answers, in the order the board listed them:
+/// each brief's own address, as that board addresses one, and its name — a slug
+/// and a project name on Linear, an issue key and a summary on Jira.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Listing {
     pub(crate) projects: Vec<(String, String)>,

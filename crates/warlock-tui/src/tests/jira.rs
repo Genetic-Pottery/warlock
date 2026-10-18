@@ -7,7 +7,7 @@ use warlock_engine::ScopeRecord;
 
 use super::{
     Calls, Client, EMAIL_TOKEN, JIRA, Jira, REQUEST_TIMEOUT, answer, authorization, base64, pair,
-    refusal, url,
+    refusal, standing, url,
 };
 
 use crate::adf::document_for;
@@ -356,7 +356,6 @@ fn untaught_verbs(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
         ("move_brief", board.move_brief("10001", "In Review").err()),
         ("ticket_brief", board.ticket_brief("PAY-1").err()),
         ("move_ticket", board.move_ticket("PAY-1", "In Review").err()),
-        ("planned_briefs", board.planned_briefs().err()),
         ("scope_queue", board.scope_queue("me").err()),
         ("named_ticket", board.named_ticket(1).err()),
         ("ticket_filing", board.ticket_filing().err()),
@@ -392,6 +391,7 @@ fn every_verb(board: &Jira<Calling>) -> Vec<(&'static str, Option<Error>)> {
 
     verbs.push(("viewer", board.viewer().err()));
     verbs.push(("fetch_brief", board.fetch_brief(BRIEF).err()));
+    verbs.push(("planned_briefs", board.planned_briefs().err()));
     verbs.push(("brief_named", board.brief_named(NAME).err()));
     verbs.push(("create_brief", board.create_brief(&a_brief()).err()));
     verbs
@@ -889,6 +889,181 @@ fn a_create_answering_no_key_is_malformed() {
         matches!(error, Error::Malformed { board: JIRA, .. }),
         "{error:?}"
     );
+}
+
+/// One page of the listing's read, as the stand-in records a call. The JQL is
+/// spelled out here rather than built from the module's own pieces, for the
+/// reason [`asked`] spells its own: a clause dropped, the category changing or
+/// the label leaving the search is a failure here and not two expressions that
+/// moved together.
+fn listed(token: Option<&str>) -> (Method, String, Value) {
+    let mut body = json!({
+        // The project key and the label are both the record's: the verb takes
+        // no argument at all, so neither can have come from anywhere else.
+        "jql": format!(
+            r#"project = {PROJECT} AND issuetype = Epic AND labels = "{LABEL}" AND statusCategory = new"#
+        ),
+        "fields": ["summary"],
+        "maxResults": 100,
+    });
+
+    if let Some(token) = token {
+        body["nextPageToken"] = json!(token);
+    }
+
+    (Method::POST, "/rest/api/3/search/jql".to_owned(), body)
+}
+
+#[test]
+fn the_planned_briefs_are_the_labelled_epics_nobody_has_started_by_key_and_summary() {
+    let board = Jira::new(
+        Calling::answering([Ok(page(
+            &[
+                ("PAY-14", "Draft from the board"),
+                ("PAY-21", "Give the CLI a voice"),
+            ],
+            None,
+        ))]),
+        a_scope(),
+    );
+
+    let listing = board.planned_briefs().expect("the stand-in answered");
+
+    // The issue key where the Linear arm answers a slug: it is what a person
+    // types back into `warlock draft <scope> <key>`, which is the same key
+    // `fetch_brief` reads an Epic by.
+    assert_eq!(
+        listing.projects(),
+        [
+            ("PAY-14".to_owned(), "Draft from the board".to_owned()),
+            ("PAY-21".to_owned(), "Give the CLI a voice".to_owned()),
+        ]
+    );
+    // One request, a POST with the JQL in its body, narrowed to the project,
+    // the label, the issue type and the status category — so an Epic warlock
+    // did not file, and one somebody has started or finished, never arrives.
+    assert_eq!(board.calls.made(), [listed(None)]);
+}
+
+#[test]
+fn the_category_a_listing_asks_for_is_the_one_a_fetched_epic_is_draftable_in() {
+    let board = Jira::new(Calling::answering([Ok(page(&[], None))]), a_scope());
+
+    board.planned_briefs().expect("the stand-in answered");
+
+    let jql = board.calls.made()[0].2["jql"]
+        .as_str()
+        .expect("the search carries a JQL string")
+        .to_owned();
+
+    // The two halves of the same judgement: the word the search narrows by is
+    // the category `standing` calls draftable, and the categories it leaves out
+    // are the ones a fetched Epic is refused for. A listing offering a brief
+    // the draft after it turns down would be offering work that cannot be cut.
+    assert!(jql.contains("statusCategory = new"), "{jql}");
+    for (category, draftable) in [("new", true), ("indeterminate", false), ("done", false)] {
+        assert_eq!(
+            standing(Some(&json!({
+                "name": "A column",
+                "statusCategory": { "key": category },
+            })))
+            .1,
+            draftable,
+            "{category}"
+        );
+    }
+}
+
+#[test]
+fn a_listing_reads_every_page_by_the_token_the_page_before_it_gave() {
+    let board = Jira::new(
+        Calling::answering([
+            Ok(page(&[("PAY-14", "Draft from the board")], Some("page-2"))),
+            Ok(page(&[("PAY-21", "Give the CLI a voice")], None)),
+        ]),
+        a_scope(),
+    );
+
+    let listing = board.planned_briefs().expect("the stand-in answered");
+
+    assert_eq!(listing.projects().len(), 2, "{:?}", listing.projects());
+    // One request per page, the second carrying the token the first answered,
+    // and the page with no token is the last.
+    assert_eq!(board.calls.made(), [listed(None), listed(Some("page-2"))]);
+}
+
+#[test]
+fn a_project_holding_no_such_epic_answers_an_empty_listing_and_not_a_failure() {
+    // Which is what lets the caller print its own nothing-to-list line: an
+    // empty project is an ordinary answer and not a read that went wrong.
+    let board = Jira::new(Calling::answering([Ok(page(&[], None))]), a_scope());
+
+    let listing = board.planned_briefs().expect("the stand-in answered");
+
+    assert!(listing.projects().is_empty(), "{:?}", listing.projects());
+    assert_eq!(board.calls.made(), [listed(None)]);
+}
+
+#[test]
+fn a_listing_jira_refuses_is_reported_in_jiras_words_and_is_not_retried() {
+    let said = "The value 'area/pay' does not exist for the field 'labels'.";
+    let board = Jira::new(
+        Calling::answering([Err(Error::Refused {
+            board: JIRA,
+            message: said.to_owned(),
+        })]),
+        a_scope(),
+    );
+
+    let error = board.planned_briefs().expect_err("the search was refused");
+
+    assert!(error.to_string().contains(said), "{error}");
+    assert_eq!(board.calls.made(), [listed(None)], "the search was retried");
+}
+
+#[test]
+fn a_listing_page_that_failed_fails_the_read_rather_than_answering_the_ones_before_it() {
+    // A listing of half a project is a listing a person would draft from
+    // believing it whole: the brief they were looking for is the one on the
+    // page that never arrived.
+    let board = Jira::new(
+        Calling::answering([
+            Ok(page(&[("PAY-14", "Draft from the board")], Some("page-2"))),
+            Err(Error::Status {
+                board: JIRA,
+                code: 502,
+            }),
+        ]),
+        a_scope(),
+    );
+
+    let error = board.planned_briefs().expect_err("a page did not arrive");
+
+    assert!(
+        matches!(error, Error::Status { code: 502, .. }),
+        "{error:?}"
+    );
+    assert_eq!(board.calls.made().len(), 2, "{:?}", board.calls.made());
+}
+
+#[test]
+fn a_listing_answer_missing_its_issues_a_key_or_a_summary_is_malformed() {
+    for answer in [
+        json!({ "total": 1 }),
+        json!({ "issues": [{ "fields": { "summary": "Draft from the board" } }] }),
+        json!({ "issues": [{ "key": "PAY-14" }] }),
+    ] {
+        let board = Jira::new(Calling::answering([Ok(answer.clone())]), a_scope());
+
+        let error = board
+            .planned_briefs()
+            .expect_err("not the answer asked for");
+
+        assert!(
+            matches!(error, Error::Malformed { board: JIRA, .. }),
+            "{answer}: {error:?}"
+        );
+    }
 }
 
 /// The key a draft is handed, as a person types one: the whole address of the
