@@ -21,9 +21,9 @@ use warlock_engine::{FiledTo, ScopeRecord};
 
 use crate::adf::{body_for, document_for};
 use crate::board::{
-    Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief, FiledTicket,
-    Holder, Listing, Moved, NamedTicket, NewBrief, NewTicket, Priority, Queue, QueuedTicket,
-    SKIP_NOTE, TicketBrief,
+    Assignee, Blocker, Board, CUT_NOTE, Category, Error, FetchedBrief, Filable, FiledBrief,
+    FiledTicket, Holder, Listing, Moved, NamedTicket, NewBrief, NewTicket, Priority, Queue,
+    QueuedTicket, SKIP_NOTE, TicketBrief,
 };
 use crate::linear::REQUEST_TIMEOUT;
 use crate::queue::same_name;
@@ -129,6 +129,16 @@ const BRIEF_FIELDS: &str = "summary,status,description";
 /// ticket: it is the whole of what [`blocking`] reads, and leaving it off is an
 /// answer in which every held-up ticket looks ready.
 const QUEUED_FIELDS: &[&str] = &["summary", "status", "description", "priority", "issuelinks"];
+
+/// The three fields a named ticket is read for beyond [`QUEUED_FIELDS`], which
+/// are the three a queue answered with a filter instead: the project the issue
+/// is in, the labels it carries and the account it is assigned to.
+///
+/// Asked for by name beside the queue's own, and never read off anything else.
+/// A named read applies none of the queue's filters, so these arrive as facts
+/// about the issue — which is what lets a refusal name the one that failed
+/// rather than saying only that the ticket is not in the queue.
+const NAMED_FIELDS: &[&str] = &["project", "labels", "assignee"];
 
 /// The field a cut's pre-flight reads the Epic back for, which is one field
 /// because nothing of it is read: what the read answers is whether the Epic is
@@ -280,14 +290,15 @@ impl Calls for Client {
 /// handed any of them. Owned rather than borrowed, because a board is opened on
 /// a panel worker and outlives the manifest read that produced the record.
 ///
-/// Every verb but twelve refuses as this stands: the two a push makes, the
+/// Every verb but thirteen refuses as this stands: the two a push makes, the
 /// brief-by-name lookup and the brief create; the two a cut reads first, for
 /// whose key it is and for the brief itself; the pre-flight a cut settles
 /// before it files anything and the create that files each of a slice's drafts;
 /// the edge between two of those tickets, the note that records the slice and
 /// the brief's own move once every slice is settled; the listing a bare
-/// `warlock draft` prints; and the queue a pull chooses a ticket out of, with
-/// the move that puts the ticket it chose in another column. The requests
+/// `warlock draft` prints; and the three a pull reads work with — the queue it
+/// chooses a ticket out of, the one ticket a person names instead of choosing,
+/// and the move that puts whichever was taken in another column. The requests
 /// themselves arrive a slice at a time, and a board that refuses is what keeps a
 /// flow which reaches a verb nobody has written yet a sentence rather than a
 /// panic.
@@ -898,8 +909,60 @@ impl<C: Calls> Board for Jira<C> {
         Ok(Queue { issues })
     }
 
-    fn named_ticket(&self, _number: u64) -> Result<Option<NamedTicket>, Error> {
-        self.untaught("read a ticket by number")
+    /// The one ticket in the record's project with that number — the issue
+    /// whose key is the project key and the number, `PAY-15` — with the three
+    /// facts a refusal names beside it, or `None` when the site holds no such
+    /// issue.
+    ///
+    /// The number alone is what the caller hands over, as the Linear arm takes
+    /// one: the prefix a person typed is checked against the scope before
+    /// anything is asked, and the project here can only have come off the
+    /// record.
+    ///
+    /// One GET on the issue itself and not a JQL search, which is the choice
+    /// worth stating: a key the site has no issue for is a 404, and a 404 is
+    /// already the absence [`fetch_brief`](Self::fetch_brief) answers `None`
+    /// for — where `key = PAY-999` in JQL is a search Jira refuses in its own
+    /// words, and a refusal is not an answer saying the ticket is not there.
+    ///
+    /// None of the queue's filters, and that is the point of reading it this
+    /// way: the project, the label and the assignee are what make a queue, and
+    /// an issue *missing* from a filtered search cannot say which filter dropped
+    /// it. So all three are read off the answer as [`NAMED_FIELDS`], never
+    /// copied across from the record the request was built from — which would
+    /// be the question answered by the question — and the caller's check on
+    /// them names the one that failed.
+    ///
+    /// No status clause either, for the reason `linear.rs`'s own `named_issue`
+    /// leaves its state filter off: a ticket that shipped last week is absent
+    /// from the queue too, and a refusal calling that "not in your project"
+    /// would be a lie about the board. A finished ticket comes back and the
+    /// caller refuses it in its own words.
+    ///
+    /// The ticket itself is [`queued`]'s, parsed by the function a queue read
+    /// parses with, so a named ticket and a chosen one are one value and the
+    /// rules over them cannot drift.
+    fn named_ticket(&self, number: u64) -> Result<Option<NamedTicket>, Error> {
+        let (_, project_key) = self.site()?;
+        // Trimmed and upper cased because Jira writes its project keys that
+        // way and a record's key is something a person typed: the key on the
+        // wire is then the one Jira itself prints, rather than whatever a site
+        // makes of `pay-15`.
+        let key = format!("{}-{number}", project_key.trim().to_uppercase());
+
+        let issue = match self.calls.call(Method::GET, &named(&key), Value::Null) {
+            Ok(issue) => issue,
+            Err(Error::Absent { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let fields = issue.get("fields").ok_or_else(|| missing("fields"))?;
+
+        Ok(Some(NamedTicket {
+            issue: queued(&issue)?,
+            team: project_key_of(fields)?,
+            labels: labelled(fields)?,
+            assignee: held_by_account(fields)?,
+        }))
     }
 
     /// File the brief as an Epic in the project the record names, carrying the
@@ -1259,6 +1322,20 @@ fn comments(key: &str, read: usize) -> String {
     )
 }
 
+/// Where one issue is read whole enough to be checked against a scope: the key
+/// [`Jira::named_ticket`] built, and every field the ticket and the three facts
+/// beside it are read out of.
+///
+/// The fields are in the path because a GET's query parameters are, which is
+/// the same reason a JQL read is a POST. Asked for by name, as every other read
+/// here asks: an issue read with no `fields` carries every field the site has,
+/// every custom one included.
+fn named(key: &str) -> String {
+    let fields: Vec<&str> = QUEUED_FIELDS.iter().chain(NAMED_FIELDS).copied().collect();
+
+    format!("{ISSUE}/{key}?fields={}", fields.join(","))
+}
+
 /// Where one issue's moves are read and where one of them is spent: the same
 /// path for both, a GET answering what the workflow offers from where the issue
 /// stands and a POST taking one of them by its id.
@@ -1358,6 +1435,80 @@ fn queued(issue: &Value) -> Result<QueuedTicket, Error> {
         priority: ranked(fields),
         blockers: blocking(fields)?,
     })
+}
+
+/// The project the named issue is in, by the key every issue of it is prefixed
+/// with — `PAY` — which is how a scope record names a project, so the two are
+/// comparable without resolving either to an id.
+///
+/// Off the answer and never off the record: the record's key is what the
+/// request was addressed with, so copying it here would answer the caller's
+/// check with the caller's own request. An issue the key resolves to from some
+/// other project — Jira keeps the old key of an issue moved between projects
+/// resolving — says which project it is in here and nowhere else.
+fn project_key_of(fields: &Value) -> Result<String, Error> {
+    fields
+        .get("project")
+        .and_then(|project| project.get("key"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| missing("project.key"))
+}
+
+/// Every label on the named issue, by name. Jira writes a label as a bare
+/// string on the issue, so there is nothing to resolve and nothing to page.
+///
+/// An issue with none is the empty list and not an absence: no labels is a
+/// perfectly ordinary issue, and it is a refusal for the caller to word rather
+/// than a malformed answer.
+///
+/// The field missing altogether is malformed all the same, where `issuelinks`
+/// missing is read as a ticket with no links. The difference is what each
+/// absence would cost: a ticket whose labels could not be read, taken for a
+/// ticket carrying none, is refused for a label it may well have.
+fn labelled(fields: &Value) -> Result<Vec<String>, Error> {
+    fields
+        .get("labels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| missing("labels"))?
+        .iter()
+        .map(|label| {
+            label
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| missing("labels entry"))
+        })
+        .collect()
+}
+
+/// Who holds the named issue: the `accountId` the check is made on and the
+/// display name a refusal prints, or `None` for a ticket nobody is on.
+///
+/// Both, for the reason [`Assignee`] holds both: two people on a site can share
+/// a display name, so the id is the only honest answer to whether a ticket is
+/// yours, and the name is the half a person reads.
+///
+/// `null` is an answer and not a malformed one — an unassigned ticket is an
+/// ordinary ticket the caller refuses in its own words. The field left out of
+/// the answer altogether is not the same thing: it was asked for by name, and
+/// an answer that does not carry it is not the call that was made.
+fn held_by_account(fields: &Value) -> Result<Option<Assignee>, Error> {
+    match fields.get("assignee") {
+        None => Err(missing("assignee")),
+        Some(Value::Null) => Ok(None),
+        Some(account) => Ok(Some(Assignee {
+            id: account
+                .get("accountId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| missing("assignee.accountId"))?
+                .to_owned(),
+            name: account
+                .get("displayName")
+                .and_then(Value::as_str)
+                .ok_or_else(|| missing("assignee.displayName"))?
+                .to_owned(),
+        })),
+    }
 }
 
 /// Every issue holding up the one these fields belong to, off its `issuelinks`.
