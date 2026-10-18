@@ -196,6 +196,8 @@ python3 -m unittest discover -s tests
 claude plugin validate .
 ```
 
+To change Warlock, see [Contributing](CONTRIBUTING.md).
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
