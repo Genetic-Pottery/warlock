@@ -1,0 +1,14 @@
+{
+  "name": "warlock",
+  "description": "Team scopes for AI work in a shared repository.",
+  "owner": {
+    "name": "Genetic-Pottery"
+  },
+  "plugins": [
+    {
+      "name": "warlock",
+      "source": "./",
+      "description": "Team scopes for AI work in a shared repository."
+    }
+  ]
+}

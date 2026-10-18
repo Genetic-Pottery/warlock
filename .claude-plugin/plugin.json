@@ -1,0 +1,9 @@
+{
+  "name": "warlock",
+  "version": "0.1.0",
+  "description": "Team scopes for AI work in a shared repository: every change starts from a Linear or Jira ticket and stays inside that team's directories.",
+  "author": { "name": "Cole Michaels" },
+  "repository": "https://github.com/Genetic-Pottery/warlock",
+  "license": "Apache-2.0",
+  "keywords": ["scopes", "monorepo", "linear", "jira", "workflow"]
+}

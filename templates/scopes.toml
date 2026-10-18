@@ -1,0 +1,31 @@
+# Settings at the top are defaults. Any scope can override any of them.
+base = "main"                       # branch work starts from and pull requests target
+label = "warlock"                   # tickets an agent may pull carry this label
+start_state = "In Progress"         # ticket state while an agent works it
+review_state = "In Review"          # ticket state once its pull request is open
+project_start_state = "In Progress" # project or epic state once its tickets are drafted
+project_review_state = "In Review"  # project or epic state once every ticket is in review or done
+
+# One [[scope]] per team area. A path belongs to the scope with the nearest
+# matching entry in `paths`. A path no scope covers is closed to AI work.
+[[scope]]
+name = "data-plane"
+paths = ["services/data-plane"]
+tracker = "linear"        # "linear" or "jira"
+team = "DP"               # Linear team key or Jira project key; also the ticket key prefix
+
+[[scope]]
+name = "control-plane"
+paths = ["services/control-plane"]
+tracker = "jira"
+team = "CP"
+base = "release"          # this team's pull requests target `release`
+review_state = "Code Review"
+
+# A shared scope is writable from any team's ticket.
+[[scope]]
+name = "shared"
+paths = ["libs/proto", "Cargo.toml", "Cargo.lock"]
+tracker = "linear"
+team = "PLAT"
+shared = true

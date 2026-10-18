@@ -1,0 +1,13 @@
+name: warlock scope check
+description: Fail a Warlock pull request (labelled `warlock`) that names no ticket, changes paths outside its team's scopes, or skips the PR template.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+      run: python3 "$GITHUB_ACTION_PATH/scripts/warlock.py" ci --base "origin/$BASE_REF"
