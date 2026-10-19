@@ -13,9 +13,7 @@
 
 ---
 
-> **warlock** *(n.)* one who draws power from a pact with an entity greater than
-> themselves. The patron is the model. The pact is the boundary. Invocations are
-> agent runs.
+> **warlock** *(n.)* one who draws power from a pact with an entity greater than themselves.
 
 Warlock is a Claude Code plugin for teams that share a repository. Each team owns
 a set of directories, called a *scope*, linked to its Linear team or Jira
