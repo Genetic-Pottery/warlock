@@ -99,6 +99,19 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(warlock.ManifestError):
             warlock.parse_manifest('start_state = ""\n' + MANIFEST)
 
+    def test_project_branches_is_off_by_default(self):
+        self.assertFalse(manifest().project_branches)
+        self.assertTrue(warlock.parse_manifest("project_branches = true\n" + MANIFEST).project_branches)
+
+    def test_project_branches_is_set_only_at_the_top(self):
+        cases = {
+            "not a bool": 'project_branches = "yes"\n' + MANIFEST,
+            "per scope": MANIFEST.replace('team = "CP"', 'team = "CP"\nproject_branches = true'),
+        }
+        for name, text in cases.items():
+            with self.subTest(name), self.assertRaises(warlock.ManifestError):
+                warlock.parse_manifest(text)
+
 
 class TicketTests(unittest.TestCase):
     def test_finds_known_keys_in_branch_names(self):
@@ -283,6 +296,18 @@ class StopTests(RepoTestCase):
         self.assertIn("services/control/b.rs", err)
         self.assertIn("README.md", err)
 
+
+    def test_diffs_against_the_recorded_project_branch(self):
+        self.git("checkout", "-q", "-b", "project/cats")
+        self.write("services/control/b.rs", "CP-1 merged into the project")
+        self.git("commit", "-qam", "CP-1: control work")
+        self.git("checkout", "-q", "-b", "dp-2-data")
+        self.write("services/data/a.rs", "changed")
+        self.assertEqual(self.run_cli("stop", stdin="{}")[0], 2)
+
+        self.git("config", "branch.dp-2-data.warlock-base", "project/cats")
+        self.assertEqual(self.run_cli("stop", stdin="{}")[0], 0)
+        self.assertEqual(self.run_cli("check")[0], 0)
 
     def test_only_warns_on_a_branch_with_no_ticket(self):
         self.write("services/control/b.rs", "a person's edit")

@@ -55,6 +55,7 @@ class Scope:
 class Manifest:
     scopes: tuple[Scope, ...]
     defaults: dict[str, str]
+    project_branches: bool = False
 
     @property
     def teams(self) -> set[str]:
@@ -87,6 +88,9 @@ def parse_manifest(text: str) -> Manifest:
         raise ManifestError(f"{MANIFEST} is not valid TOML: {error}") from error
 
     defaults = read_settings(data, SETTINGS, "the manifest")
+    project_branches = data.get("project_branches", False)
+    if not isinstance(project_branches, bool):
+        raise ManifestError("`project_branches` must be true or false")
 
     entries = data.get("scope", [])
     if not isinstance(entries, list) or not entries:
@@ -129,6 +133,10 @@ def parse_manifest(text: str) -> Manifest:
         if not isinstance(shared, bool):
             raise ManifestError(f"{where}: `shared` must be true or false")
 
+        # One project spans several teams' scopes, so a per-scope switch would land
+        # part of a project on its project branch and the rest on `base`.
+        if "project_branches" in entry:
+            raise ManifestError(f"{where}: set `project_branches` at the top of the manifest, not per scope")
         settings = read_settings(entry, defaults, where)
         for other in scopes:
             if other.team == team and not other.shared and not shared and other.settings["base"] != settings["base"]:
@@ -138,7 +146,7 @@ def parse_manifest(text: str) -> Manifest:
         scopes.append(
             Scope(name=name, paths=tuple(paths), tracker=tracker, team=team, shared=shared, settings=settings)
         )
-    return Manifest(scopes=tuple(scopes), defaults=defaults)
+    return Manifest(scopes=tuple(scopes), defaults=defaults, project_branches=project_branches)
 
 
 def read_settings(table: dict, fallback: dict[str, str], where: str) -> dict[str, str]:
@@ -239,6 +247,17 @@ def resolve_base(root: Path, base: str) -> str | None:
     return None
 
 
+def branch_base(root: Path, manifest: Manifest, ticket: str | None) -> str:
+    """The branch this ticket branch left from: its `warlock-base` git config, else the scope's base.
+
+    Pull records a project branch in git config rather than passing `--base`,
+    because the stop hook runs with no arguments.
+    """
+    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
+    recorded = git(root, "config", "--get", f"branch.{branch}.warlock-base", check=False).strip()
+    return recorded or manifest.base_for(ticket)
+
+
 def changed_paths(root: Path, base: str | None, committed_only: bool = False) -> list[PurePosixPath]:
     """Paths changed since the branch left `base`: commits, staged, unstaged and untracked.
 
@@ -332,7 +351,7 @@ def command_stop(_: argparse.Namespace) -> int:
         return OK
 
     ticket = current_ticket(root, manifest)
-    found = crossings(manifest, ticket, changed_paths(root, resolve_base(root, manifest.base_for(ticket))))
+    found = crossings(manifest, ticket, changed_paths(root, resolve_base(root, branch_base(root, manifest, ticket))))
     if not found:
         return OK
 
@@ -358,7 +377,7 @@ def command_check(args: argparse.Namespace) -> int:
         return CONFIG_ERROR
     root, manifest = found
     ticket = args.ticket.upper() if args.ticket else current_ticket(root, manifest)
-    base = resolve_base(root, args.base or manifest.base_for(ticket))
+    base = resolve_base(root, args.base or branch_base(root, manifest, ticket))
     crossed = crossings(manifest, ticket, changed_paths(root, base))
     print(f"ticket: {ticket or 'none'}  base: {base or 'none (working tree only)'}")
     for reason in crossed:
@@ -435,7 +454,13 @@ def command_scopes(args: argparse.Namespace) -> int:
     ticket = current_ticket(root, manifest)
     if args.json:
         scopes = [{**asdict(scope), "paths": [str(path) for path in scope.paths]} for scope in manifest.scopes]
-        print(json.dumps({"ticket": ticket, "base": manifest.base_for(ticket), "scopes": scopes}, indent=2))
+        report = {
+            "ticket": ticket,
+            "base": manifest.base_for(ticket),
+            "project_branches": manifest.project_branches,
+            "scopes": scopes,
+        }
+        print(json.dumps(report, indent=2))
         return OK
     for scope in manifest.scopes:
         kind = "shared" if scope.shared else f"{scope.tracker} {scope.team}"
@@ -461,7 +486,7 @@ def command_progress(args: argparse.Namespace) -> int:
     if ticket is None:
         print("warlock: this branch names no ticket", file=sys.stderr)
         return CONFIG_ERROR
-    base = resolve_base(root, manifest.base_for(ticket))
+    base = resolve_base(root, branch_base(root, manifest, ticket))
     log = git(root, "log", "--format=%s", f"{base}..HEAD" if base else "HEAD", check=False)
     dirty = bool(git(root, "status", "--porcelain", check=False).strip())
     print(json.dumps({"ticket": ticket, "base": base, "finished": finished_subtasks(log, ticket), "dirty": dirty}))
@@ -516,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
 
     check = commands.add_parser("check", help="list changes the current ticket may not touch")
     check.add_argument("--ticket", help="ticket key; default is the one in the branch name")
-    check.add_argument("--base", help="branch to diff against; default is the ticket scope's base")
+    check.add_argument("--base", help="branch to diff against; default is the branch's warlock-base, else the ticket scope's base")
     check.set_defaults(run=command_check)
 
     ci = commands.add_parser("ci", help="pull request check (reads PR_LABELS, PR_TITLE, PR_BODY, PR_HEAD_REF)")

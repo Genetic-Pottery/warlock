@@ -26,6 +26,7 @@ The warlock CLI is `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/warlock.py"`, written
 `${CLAUDE_PLUGIN_ROOT}/reference/trackers.md`. Settings in backticks (`base`,
 `label`, `start_state`, `review_state`, `project_review_state`) come from
 `warlock scopes --json`, under the scope whose `team` matches the ticket.
+`project_branches` is at the top level of the same JSON.
 
 ## 1. Preflight
 
@@ -57,10 +58,22 @@ run planned it: **resume**. Otherwise, **start**.
 **Start:**
 
 1. If `git status --porcelain` prints anything, stop and say so.
-2. Run `git fetch origin`. If a local branch starting `<key in lowercase>-`
-   exists, an earlier run halted before planning: switch to it. Otherwise run
-   `git switch -c <key in lowercase>-<short slug> origin/<base>`.
-3. Move the ticket to `start_state`.
+2. Pick the target, the branch the pull request merges into. When
+   `project_branches` is true and the ticket has a parent project or epic, the
+   target is `project/<slug>`: the parent's name in lowercase, with every run of
+   characters that aren't letters or digits replaced by `-`. Otherwise the
+   target is `base`.
+3. Run `git fetch origin`. If the target is a project branch and
+   `origin/<target>` doesn't exist, run
+   `git push origin origin/<base>:refs/heads/<target>`. If that push is
+   rejected, another run created the branch first: run `git fetch origin`
+   again.
+4. If a local branch starting `<key in lowercase>-` exists, an earlier run
+   halted before planning: switch to it. Otherwise run
+   `git switch -c <key in lowercase>-<short slug> origin/<target>`.
+5. Run `git config branch.<branch>.warlock-base <target>`, so the hooks and
+   `warlock check` diff against the target.
+6. Move the ticket to `start_state`.
 
 **Resume:**
 
@@ -68,8 +81,10 @@ run planned it: **resume**. Otherwise, **start**.
 2. Run `git fetch origin`. Switch to the plan's branch: the local one if it
    exists, otherwise `git switch -c <branch> origin/<branch>`. If neither
    exists, the earlier run pushed nothing: delete nothing, and start over from
-   step 2 of **Start** on the same branch name.
-3. If `git status --porcelain` prints anything, it's the interrupted
+   step 3 of **Start** with the plan's target and branch name.
+3. Run `git config branch.<branch>.warlock-base <target>`, with the plan's
+   target.
+4. If `git status --porcelain` prints anything, it's the interrupted
    sub-task's partial work. Run
    `git stash push -u -m "warlock: interrupted <KEY>"` and redo that sub-task.
 
@@ -99,6 +114,7 @@ Post the plan as a ticket comment in this shape, and keep the comment's id:
 ```markdown
 Warlock plan
 branch: <branch>
+target: <target>
 
 - [ ] 1. <goal>
   - done when: <statement>; <statement>
@@ -135,7 +151,7 @@ Done when `warlock progress` lists every sub-task in the plan.
    `<KEY>.<N+1>: fix <what>`.
 2. Run `gh label create warlock --description "Opened by Warlock" --force`, so
    the label exists. Open the pull request with
-   `gh pr create --base <base> --label warlock`, titled `<KEY>: <ticket title>`.
+   `gh pr create --base <target> --label warlock`, titled `<KEY>: <ticket title>`.
    Fill every section of `.github/pull_request_template.md` from the sub-task
    reports. CI checks only pull requests with this label.
 3. Move the ticket to `review_state` and comment with the pull request link.

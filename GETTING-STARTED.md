@@ -228,7 +228,8 @@ it.
 Until it's required, the CI check only reports. To enforce it:
 
 1. On GitHub, open the repository's **Settings** > **Branches**.
-2. Add a branch protection rule for your base branch.
+2. Add a branch protection rule for your base branch. With
+   `project_branches` on, add one for `project/*` too.
 3. Select **Require status checks to pass before merging**, and add the
    `scopes` check.
 
@@ -275,7 +276,8 @@ Pull plans sub-tasks and posts the plan on the ticket. It works each sub-task in
 a fresh subagent, commits it as `KEY.N: goal`, and pushes. It ends in one of two
 outcomes:
 
-- **Finished:** a pull request is open against `base`, and the ticket is in
+- **Finished:** a pull request is open against `base`, or against
+  `project/<slug>` with `project_branches` on, and the ticket is in
   `review_state`. When it's the project's last open ticket, the project moves to
   `project_review_state`.
 - **Halted:** the ticket needs a person. It has a `Warlock halted:` comment

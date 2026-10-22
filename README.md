@@ -165,6 +165,18 @@ Settings at the top of the file are defaults, and any scope can override them:
 | `project_start_state` | `In Progress` | Project or epic state once its tickets are drafted |
 | `project_review_state` | `In Review` | Project or epic state once every ticket is in review or done |
 
+One setting applies to the whole manifest, and no scope can override it:
+
+| Setting | Default | Controls |
+|---|---|---|
+| `project_branches` | `false` | When `true`, a ticket in a project or epic targets the branch `project/<slug>` instead of `base` |
+
+With `project_branches` on, a project's work stays off `base` until a person
+opens and merges the pull request from `project/<slug>`. Pull creates the
+branch from `base` the first time a ticket in the project needs it. The slug
+comes from the project's name, so renaming a project mid-way gives its later
+tickets a new branch.
+
 Linear has no `In Review` project status by default. Add one in Linear's
 settings, or set `project_review_state` to a status you have.
 
