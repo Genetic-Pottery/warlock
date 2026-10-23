@@ -36,6 +36,11 @@ Write one or more tickets per slice in the template's shape. Each ticket:
   ticket's scope
 - depends on the tickets it needs first: the slice's `depends_on`, plus order
   within the slice
+- when `project_branches` is true, ends with a `## Project branch` section
+  that holds only `project/<slug>`. The slug is the brief's title in
+  lowercase, with every run of characters that aren't letters or digits
+  replaced by `-`. Every ticket of the brief names the same branch, whichever
+  team it belongs to.
 
 Where the brief leaves a choice open, ask the person. In a session with nobody
 to ask, file the ticket with the question at the top of its Context section.
@@ -53,3 +58,4 @@ Reply with each ticket's key, title, and blockers.
 
 Settings such as `label` and `project_start_state` come from
 `warlock scopes --json`, under the scope that owns slice 1.
+`project_branches` is at the top level of the same JSON.

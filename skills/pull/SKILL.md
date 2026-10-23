@@ -59,10 +59,11 @@ run planned it: **resume**. Otherwise, **start**.
 
 1. If `git status --porcelain` prints anything, stop and say so.
 2. Pick the target, the branch the pull request merges into. When
-   `project_branches` is true and the ticket has a parent project or epic, the
-   target is `project/<slug>`: the parent's name in lowercase, with every run of
-   characters that aren't letters or digits replaced by `-`. Otherwise the
-   target is `base`.
+   `project_branches` is true and the ticket's description has a
+   `## Project branch` section, the target is the branch named there.
+   Otherwise the target is `base`. Read the section rather than the ticket's
+   parent: a Jira ticket in another team's project can't have the epic as its
+   parent.
 3. Run `git fetch origin`. If the target is a project branch and
    `origin/<target>` doesn't exist, run
    `git push origin origin/<base>:refs/heads/<target>`. If that push is

@@ -6,7 +6,7 @@ start_state = "In Progress"         # ticket state while an agent works it
 review_state = "In Review"          # ticket state once its pull request is open
 project_start_state = "In Progress" # project or epic state once its tickets are drafted
 project_review_state = "In Review"  # project or epic state once every ticket is in review or done
-project_branches = false            # true: a project's tickets target `project/<slug>`; top level only
+project_branches = false            # true: tickets target the project branch they name; top level only
 
 # One [[scope]] per team area. A path belongs to the scope with the nearest
 # matching entry in `paths`. A path no scope covers is closed to AI work.
