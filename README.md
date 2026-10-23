@@ -171,8 +171,10 @@ One setting applies to the whole manifest, and no scope can override it:
 |---|---|---|
 | `project_branches` | `false` | When `true`, a ticket targets the project branch its description names instead of `base` |
 
-With `project_branches` on, a project's work stays off `base` until a person
-opens and merges the pull request from `project/<slug>`:
+With `project_branches` on, each project gets its own branch,
+`project/<slug>`, and several projects can be open at once. A project's work
+reaches `base` only when a person merges its branch. The branch works like
+this:
 
 - Draft writes `project/<slug>` into a `## Project branch` section of each
   ticket, from the brief's title. Renaming the project later doesn't change it.
